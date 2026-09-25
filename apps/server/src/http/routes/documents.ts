@@ -201,4 +201,19 @@ export const documentRoutes: RouteModule = (app, ctx) => {
       return result;
     },
   );
+
+  /** Documents whose _id is text that looks exactly like an ObjectId (usually from an import). */
+  app.get("/api/v1/documents/:id/collections/:collection/text-ids", async (req) => {
+    const { id, collection } = collectionParams.parse(req.params);
+    requireDocPermission(ctx, req, id, "app.view");
+    return { count: await browser().textIdCount(id, collection) };
+  });
+
+  app.post("/api/v1/documents/:id/collections/:collection/convert-ids", async (req) => {
+    const { id, collection } = collectionParams.parse(req.params);
+    const { user } = requireDocPermission(ctx, req, id, "app.data.write");
+    const result = await browser().convertTextIds(id, collection);
+    audit(user, "document_collection.convert_ids", id, { collection, ...result });
+    return result;
+  });
 };

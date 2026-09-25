@@ -130,7 +130,23 @@ export function DocumentDatabaseDetail({ me }: { me: Me }) {
   const { data, error, loading, reload } = useApi<DocumentPage>(base ? `${base}?${query}` : null);
   const writable = database ? canWrite(me, database.ownerAppIds) : false;
   const exportUrl = base ? `/api/v1${base}/export.json${filter ? `?filter=${encodeURIComponent(filter)}` : ""}` : "#";
-  const refresh = async () => { await Promise.all([reload(), reloadCollections(), reloadDb()]); };
+  const { data: textIds, reload: reloadTextIds } = useApi<{ count: number }>(base ? `${base}/text-ids` : null);
+  const [converting, setConverting] = useState(false);
+  const [convertNote, setConvertNote] = useState<string | null>(null);
+  const refresh = async () => { await Promise.all([reload(), reloadCollections(), reloadDb(), reloadTextIds()]); };
+  async function convertIds() {
+    if (!base) return;
+    setConverting(true);
+    try {
+      const r = await post<{ converted: number; skipped: number }>(`${base}/convert-ids`);
+      setConvertNote(`Converted ${r.converted} id${r.converted === 1 ? "" : "s"} to ObjectIds${r.skipped ? ` (${r.skipped} skipped: that ObjectId already exists)` : ""}. Your app can now find these documents by id.`);
+      await refresh();
+    } catch (e) {
+      setConvertNote((e as Error).message);
+    } finally {
+      setConverting(false);
+    }
+  }
 
   async function saveDocument(text: string) {
     if (!base) return;
@@ -200,6 +216,15 @@ export function DocumentDatabaseDetail({ me }: { me: Me }) {
             </form>
             {!filter && <div className="filter-chips"><span className="small muted">Examples:</span>{FILTER_EXAMPLES.map((ex) => <button key={ex} className="mono" onClick={() => { setFilterDraft(ex); filterRef.current?.focus(); }}>{ex}</button>)}</div>}
             <ErrorNote error={writeError} />
+            {!!textIds?.count && (
+              <div className="notice warn small text-id-note">
+                <span>
+                  <strong>{textIds.count} document{textIds.count === 1 ? " has its" : "s have their"} id stored as text.</strong> Apps usually look documents up by ObjectId (for example Mongoose <code>findById</code>), so {textIds.count === 1 ? "it" : "they"} won't be found. This usually comes from importing a file saved from an app or API.
+                </span>
+                {writable && <button className="btn small primary" disabled={converting} onClick={() => void convertIds()}>{converting ? <Spinner label="Converting…" /> : "Convert to ObjectIds"}</button>}
+              </div>
+            )}
+            {convertNote && <div className="notice saved-note small">{convertNote}</div>}
             {loading && !data ? <div className="folder-loading"><Spinner label="Loading documents…" /></div> : error ? <ErrorNote error={error} /> : data && (
               <div className="doc-list">
                 {data.documents.map((doc) => {

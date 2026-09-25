@@ -6,7 +6,8 @@ import { BSON, type Document, type MongoClient } from "mongodb";
 import { NexusError } from "@nexus/shared";
 import type { DocumentDatabaseManager } from "./documents";
 
-const { EJSON } = BSON;
+const { EJSON, ObjectId } = BSON;
+const OBJECT_ID_TEXT = /^[0-9a-f]{24}$/i;
 
 export interface CollectionSummary {
   name: string;
@@ -217,7 +218,7 @@ export class DocumentBrowser {
    * Imports documents from a JSON array or JSON Lines (one document per line). Existing documents
    * with the same _id are left alone and reported, so importing twice never duplicates.
    */
-  async importJson(databaseId: string, collection: string, text: string): Promise<{ inserted: number; skipped: number; errors: string[] }> {
+  async importJson(databaseId: string, collection: string, text: string): Promise<{ inserted: number; skipped: number; errors: string[]; convertedIds: number }> {
     assertCollectionName(collection);
     let docs: Document[];
     const trimmed = text.trim();
@@ -237,7 +238,16 @@ export class DocumentBrowser {
       throw NexusError.invalid("Every entry in the file must be a JSON object (a document).");
     }
     docs.forEach((d) => assertSafe(d));
-    if (!docs.length) return { inserted: 0, skipped: 0, errors: [] };
+    // Files saved from an app or API often have ids as plain text ("_id": "6a79…"). Apps look them
+    // up as ObjectIds (Mongoose findById), so a text id that is exactly an ObjectId becomes one.
+    let convertedIds = 0;
+    for (const d of docs) {
+      if (typeof d._id === "string" && OBJECT_ID_TEXT.test(d._id)) {
+        d._id = new ObjectId(d._id);
+        convertedIds++;
+      }
+    }
+    if (!docs.length) return { inserted: 0, skipped: 0, errors: [], convertedIds };
     return this.inDb(databaseId, async (c, dbName) => {
       const coll = c.db(dbName).collection(collection);
       let inserted = 0;
@@ -258,7 +268,50 @@ export class DocumentBrowser {
           }
         }
       }
-      return { inserted, skipped, errors };
+      return { inserted, skipped, errors, convertedIds };
+    });
+  }
+
+  /** How many documents have a text _id that looks exactly like an ObjectId (usually an import mistake). */
+  async textIdCount(databaseId: string, collection: string): Promise<number> {
+    assertCollectionName(collection);
+    return this.inDb(databaseId, async (c, dbName) => {
+      const ids = await c.db(dbName).collection(collection).find({ _id: { $type: "string" } as never }, { projection: { _id: 1 } }).toArray();
+      return ids.filter((d) => OBJECT_ID_TEXT.test(String(d._id))).length;
+    });
+  }
+
+  /**
+   * Turns text ids that are exactly ObjectIds into real ObjectIds (the document is copied under the
+   * new id, then the old copy removed). A document whose ObjectId already exists is left alone.
+   */
+  async convertTextIds(databaseId: string, collection: string): Promise<{ converted: number; skipped: number }> {
+    assertCollectionName(collection);
+    return this.inDb(databaseId, async (c, dbName) => {
+      const coll = c.db(dbName).collection(collection);
+      const docs = await coll.find({ _id: { $type: "string" } as never }).toArray();
+      let converted = 0;
+      let skipped = 0;
+      for (const d of docs) {
+        const text = String(d._id);
+        if (!OBJECT_ID_TEXT.test(text)) continue;
+        const oid = new ObjectId(text);
+        if (await coll.findOne({ _id: oid }, { projection: { _id: 1 } })) {
+          skipped++;
+          continue;
+        }
+        // FerretDB treats "6a79…" and ObjectId("6a79…") as the same key, so the old copy goes first;
+        // if the new one can't be written, the original is put back unchanged.
+        await coll.deleteOne({ _id: text as never });
+        try {
+          await coll.insertOne({ ...d, _id: oid });
+        } catch (e) {
+          await coll.insertOne(d);
+          throw e;
+        }
+        converted++;
+      }
+      return { converted, skipped };
     });
   }
 

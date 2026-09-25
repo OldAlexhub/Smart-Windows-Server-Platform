@@ -1,4 +1,5 @@
 import { mkdirSync, writeFileSync } from "node:fs";
+import { ObjectId } from "mongodb";
 import http from "node:http";
 import { dirname, join } from "node:path";
 import type { FastifyInstance } from "fastify";
@@ -193,11 +194,33 @@ describe("Document database browser, import/export, backup and restore", () => {
     expect(exported.body).toEqual([expect.objectContaining({ name: "Grace", _id: { $oid: expect.any(String) } })]);
 
     const again = await call("POST", `${base()}/collections/customers/import`, { content: JSON.stringify(exported.body) });
-    expect(again.body).toEqual({ inserted: 0, skipped: 1, errors: [] });
+    expect(again.body).toEqual({ inserted: 0, skipped: 1, errors: [], convertedIds: 0 });
     const lines = ['{"name":"Linus","orders":1}', '{"name":"Margaret","orders":7}', ""].join("\n");
     const fresh = await call("POST", `${base()}/collections/suppliers/import`, { content: lines, create: true });
-    expect(fresh.body).toEqual({ inserted: 2, skipped: 0, errors: [] });
+    expect(fresh.body).toEqual({ inserted: 2, skipped: 0, errors: [], convertedIds: 0 });
     expect((await call("POST", `${base()}/collections/suppliers/import`, { content: "not json" })).status).toBe(400);
+  });
+
+  it("text ids that are ObjectIds: imported as ObjectIds, and existing ones can be converted", async () => {
+    const id1 = "6a79217f0d6a7ce0393b5b38";
+    const id2 = "6a79217f0d6a7ce0393b5b39";
+    // A file saved from an API: ids as plain text.
+    const imported = await call("POST", `${base()}/collections/projects/import`, { content: JSON.stringify([{ _id: id1, title: "TaxiTwin" }, { _id: "not-an-object-id", title: "Keep" }]), create: true });
+    expect(imported.body).toMatchObject({ inserted: 2, convertedIds: 1 });
+    const found = await ctx.documents!.withDatabase(apps.require("shop").documentDatabaseId!, (c) => c.db("shop").collection("projects").findOne({ _id: new ObjectId(id1) }));
+    expect(found?.title).toBe("TaxiTwin");
+
+    // Data imported earlier as text: Nexus spots it and converts it on request.
+    await ctx.documents!.withDatabase(apps.require("shop").documentDatabaseId!, (c) => c.db("shop").collection("projects").insertOne({ _id: id2 as never, title: "Old import" }));
+    expect((await call("GET", `${base()}/collections/projects/text-ids`)).body).toEqual({ count: 1 });
+    const conv = await call("POST", `${base()}/collections/projects/convert-ids`);
+    expect(conv.body).toEqual({ converted: 1, skipped: 0 });
+    expect((await call("GET", `${base()}/collections/projects/text-ids`)).body).toEqual({ count: 0 });
+    const converted = await ctx.documents!.withDatabase(apps.require("shop").documentDatabaseId!, (c) => c.db("shop").collection("projects").findOne({ _id: new ObjectId(id2) }));
+    expect(converted?.title).toBe("Old import");
+    // Text ids that aren't ObjectIds are left exactly as they are.
+    const kept = await ctx.documents!.withDatabase(apps.require("shop").documentDatabaseId!, (c) => c.db("shop").collection("projects").findOne({ _id: "not-an-object-id" as never }));
+    expect(kept?.title).toBe("Keep");
   });
 
   it("backs up the document database and restores it exactly (types and indexes included)", async () => {
@@ -223,7 +246,7 @@ describe("Document database browser, import/export, backup and restore", () => {
     expect(r.safetyBackupId).toBeTruthy();
 
     const cols = (await call("GET", `/api/v1/documents/${id}/collections`)).body.map((c: { name: string }) => c.name);
-    expect(cols).toEqual(["customers", "orders", "suppliers"]);
+    expect(cols).toEqual(["customers", "orders", "projects", "suppliers"]);
     await ctx.documents!.withDatabase(apps.require("shop").documentDatabaseId!, async (c) => {
       const grace = await c.db("shop").collection("customers").findOne({ name: "Grace" });
       expect(grace?.orders).toBe(12);
