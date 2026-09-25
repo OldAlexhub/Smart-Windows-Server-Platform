@@ -32,11 +32,24 @@ export function hardenDataFolder(root: string, tokenFile: string, log: Logger, r
     // (OI)(CI) grant doesn't apply to files, leaving files nobody can open, not even SYSTEM.)
     run([root, "/inheritance:r", "/grant:r", `${SYSTEM}:(OI)(CI)F`, `${ADMINISTRATORS}:(OI)(CI)F`, "/C", "/Q"]);
     run([join(root, "*"), "/reset", "/T", "/C", "/Q"]);
-    for (const user of desktopUsers(root)) {
-      run([tokenFile, "/grant", `${user}:R`, "/Q"]);
-    }
   } catch (e) {
     log.warn("could not restrict permissions on the Nexus data folder", { err: e as Error });
+  }
+  allowDesktopUsers(tokenFile, root, log, run);
+}
+
+/**
+ * Lets the Windows account(s) that installed Nexus read the local sign-in key. Must run whenever
+ * the key file is (re)created — on a fresh install it doesn't exist yet when the folder is locked.
+ */
+export function allowDesktopUsers(tokenFile: string, root: string, log: Logger, run: (args: string[]) => void = defaultRun): void {
+  if (process.platform !== "win32" || !existsSync(tokenFile)) return;
+  for (const user of desktopUsers(root)) {
+    try {
+      run([tokenFile, "/grant", `${user}:R`, "/Q"]);
+    } catch (e) {
+      log.warn("could not let a desktop user read the sign-in key", { user, err: e as Error });
+    }
   }
 }
 

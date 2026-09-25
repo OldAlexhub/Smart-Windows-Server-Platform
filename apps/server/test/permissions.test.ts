@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { silentLogger } from "@nexus/shared";
-import { desktopUsers, hardenDataFolder } from "../src/service/permissions";
+import { allowDesktopUsers, desktopUsers, hardenDataFolder } from "../src/service/permissions";
 
 describe("data folder hardening", () => {
   it("reads installer-recorded desktop users and rejects anything odd", () => {
@@ -27,6 +27,22 @@ describe("data folder hardening", () => {
     expect(calls[0]).toEqual([root, "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "/C", "/Q"]);
     expect(calls[1]).toEqual([join(root, "*"), "/reset", "/T", "/C", "/Q"]);
     expect(calls[2]).toEqual([token, "/grant", "someone:R", "/Q"]);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it.runIf(process.platform === "win32")("fresh install: lets the installing account read the sign-in key once it exists", () => {
+    const root = mkdtempSync(join(tmpdir(), "nexus-acl-"));
+    const token = join(root, "local-access.token");
+    writeFileSync(join(root, "desktop-users.txt"), "LAPTOP\\mohamed\n");
+    const calls: string[][] = [];
+    const run = (a: string[]) => void calls.push(a);
+    // The folder is locked before the key is created: nothing to grant yet.
+    hardenDataFolder(root, token, silentLogger, run);
+    expect(calls.some((c) => c[1] === "/grant")).toBe(false);
+    // Starting creates the key; then the installing account gets read access.
+    writeFileSync(token, "secret");
+    allowDesktopUsers(token, root, silentLogger, run);
+    expect(calls.at(-1)).toEqual([token, "/grant", "LAPTOP\\mohamed:R", "/Q"]);
     rmSync(root, { recursive: true, force: true });
   });
 

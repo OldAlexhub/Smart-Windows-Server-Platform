@@ -10,7 +10,7 @@ import { BRAND, consoleSink, createLogger, type LogRecord } from "@nexus/shared"
 import { createNexusServer, startBackground } from "./app";
 import { NexusContext } from "./context";
 import { resolveServicePaths } from "./paths";
-import { hardenDataFolder } from "./service/permissions";
+import { allowDesktopUsers, hardenDataFolder } from "./service/permissions";
 
 // node:sqlite is stable in practice but still prints an experimental warning.
 process.removeAllListeners("warning");
@@ -44,6 +44,8 @@ async function main(): Promise<void> {
   log.info("starting", { product: BRAND.productName, home: paths.root, port, node: process.version });
 
   const ctx = await NexusContext.create({ paths, managementPort: port, logger: log });
+  // The sign-in key is (re)created while starting: let the installing account read it now too.
+  if (production && userInfo().username.toUpperCase() === "SYSTEM") allowDesktopUsers(paths.localTokenFile, paths.root, log);
   const { app, services } = await createNexusServer(ctx);
   await app.listen({ host: "127.0.0.1", port });
   log.info("listening", { url: `http://127.0.0.1:${port}` });
