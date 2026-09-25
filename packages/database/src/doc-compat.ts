@@ -1,5 +1,5 @@
 import { createServer, Socket, type Server } from "node:net";
-import { deserialize, serialize, Long, type Document } from "bson";
+import { deserialize, EJSON, serialize, Long, type Document } from "bson";
 import { aggregate as runPipeline } from "mingo";
 import { silentLogger, type Logger } from "@nexus/shared";
 import type { DocumentEngine } from "./ferretdb";
@@ -78,6 +78,52 @@ const notImplemented = (reply: Document) => reply.ok !== 1 && (reply.code === 23
 /** Stages that write or need the real server: never emulated. */
 const UNSUPPORTED_STAGES = ["$out", "$merge", "$changeStream", "$currentOp", "$collStats", "$indexStats", "$listSessions", "$planCacheStats", "$search", "$searchMeta"];
 
+/**
+ * The commands the layer can stand in for, rewritten as an aggregation over one collection:
+ * aggregate itself, find (e.g. an $expr filter), distinct and count.
+ */
+interface Emulatable {
+  coll: string;
+  db: string;
+  pipeline: Document[];
+  shape: "cursor" | "distinct" | "count";
+  /** distinct: the field whose values are collected (dotted paths allowed). */
+  key?: string;
+}
+
+export function asEmulatable(body: Document): Emulatable | null {
+  const db = String(body.$db ?? "");
+  if (body.explain) return null;
+  if (typeof body.aggregate === "string" && Array.isArray(body.pipeline)) {
+    if ((body.pipeline as Document[]).some((s) => UNSUPPORTED_STAGES.some((k) => k in s))) return null;
+    return { coll: body.aggregate, db, pipeline: body.pipeline, shape: "cursor" };
+  }
+  if (typeof body.find === "string") {
+    const p: Document[] = [];
+    if (body.filter && Object.keys(body.filter).length) p.push({ $match: body.filter });
+    if (body.sort && Object.keys(body.sort).length) p.push({ $sort: body.sort });
+    if (body.skip) p.push({ $skip: Number(body.skip) });
+    const limit = Math.abs(Number(body.limit ?? 0));
+    if (limit) p.push({ $limit: limit });
+    if (body.projection && Object.keys(body.projection).length) p.push({ $project: body.projection });
+    return { coll: body.find, db, pipeline: p, shape: "cursor" };
+  }
+  if (typeof body.distinct === "string" && typeof body.key === "string") {
+    const p: Document[] = [];
+    if (body.query && Object.keys(body.query).length) p.push({ $match: body.query });
+    return { coll: body.distinct, db, pipeline: p, shape: "distinct", key: body.key };
+  }
+  if (typeof body.count === "string") {
+    const p: Document[] = [];
+    if (body.query && Object.keys(body.query).length) p.push({ $match: body.query });
+    if (body.skip) p.push({ $skip: Number(body.skip) });
+    if (body.limit) p.push({ $limit: Math.abs(Number(body.limit)) });
+    p.push({ $count: "n" });
+    return { coll: body.count, db, pipeline: p, shape: "count" };
+  }
+  return null;
+}
+
 function foreignCollections(pipeline: Document[]): string[] {
   const names = new Set<string>();
   const walk = (stages: Document[]) => {
@@ -153,7 +199,7 @@ export class DocumentCompatProxy {
     upstream.setNoDelay(true);
 
     /** Aggregations in flight (driver request id → the command), and Nexus's own requests. */
-    const aggregations = new Map<number, Document>();
+    const aggregations = new Map<number, Emulatable>();
     const internal = new Map<number, (reply: Document) => void>();
     const ask = (body: Document): Promise<Document> =>
       new Promise((resolve) => {
@@ -164,7 +210,8 @@ export class DocumentCompatProxy {
 
     const fromClient = framer((f) => {
       const body = f.opCode === OP_MSG ? safeBody(f) : null;
-      if (body && typeof body.aggregate === "string" && Array.isArray(body.pipeline) && !body.explain) aggregations.set(f.requestId, body);
+      const emulatable = body ? asEmulatable(body) : null;
+      if (emulatable) aggregations.set(f.requestId, emulatable);
       upstream.write(f.buf);
     });
     const fromUpstream = framer((f) => {
@@ -178,8 +225,8 @@ export class DocumentCompatProxy {
       if (!command) return void client.write(f.buf);
       aggregations.delete(f.responseTo);
       const reply = safeBody(f);
-      if (!reply || !notImplemented(reply) || command.pipeline.some((s: Document) => UNSUPPORTED_STAGES.some((k) => k in s))) return void client.write(f.buf);
-      // FerretDB can't run this pipeline: run it here, then answer the driver's request.
+      if (!reply || !notImplemented(reply)) return void client.write(f.buf);
+      // FerretDB can't run this command: run it here, then answer the driver's request.
       void this.emulate(command, ask)
         .then((result) => client.write(opMsg(result, f.responseTo, internalId++)))
         .catch((e) => {
@@ -212,11 +259,9 @@ export class DocumentCompatProxy {
     upstream.connect(this.opts.upstreamPort, "127.0.0.1");
   }
 
-  /** Reads what the pipeline needs through the app's own connection and runs it with mingo. */
-  private async emulate(command: Document, ask: (body: Document) => Promise<Document>): Promise<Document> {
-    const db = String(command.$db);
-    const coll = String(command.aggregate);
-    const pipeline = command.pipeline as Document[];
+  /** Reads what the command needs through the app's own connection and runs it with mingo. */
+  private async emulate(command: Emulatable, ask: (body: Document) => Promise<Document>): Promise<Document> {
+    const { db, coll, pipeline } = command;
 
     const readAll = async (collection: string, filter: Document = {}): Promise<Document[]> => {
       const docs: Document[] = [];
@@ -246,6 +291,21 @@ export class DocumentCompatProxy {
 
     this.stats.emulated++;
     this.stats.lastEmulated = { at: new Date().toISOString(), collection: coll, operators: JSON.stringify(pipeline).match(/\$[a-zA-Z]+/g)?.slice(0, 6).join(" ") ?? "" };
+    if (command.shape === "distinct") {
+      // Collected here rather than with $group, so ObjectIds, dates and arrays compare exactly.
+      const seen = new Map<string, unknown>();
+      const collect = (v: unknown): void => {
+        if (v === undefined) return;
+        if (Array.isArray(v)) return v.forEach(collect);
+        const k = EJSON.stringify({ v } as Document, { relaxed: false });
+        if (!seen.has(k)) seen.set(k, v);
+      };
+      const valueAt = (d: unknown, path: string[]): unknown =>
+        path.reduce<unknown>((o, part) => (Array.isArray(o) ? o.map((x) => (x as Document | undefined)?.[part]) : (o as Document | undefined)?.[part]), d);
+      for (const d of results) collect(valueAt(d, command.key!.split(".")));
+      return { values: [...seen.values()], ok: 1 };
+    }
+    if (command.shape === "count") return { n: Number(results[0]?.n ?? 0), ok: 1 };
     return { cursor: { id: Long.fromNumber(0), ns: `${db}.${coll}`, firstBatch: results }, ok: 1 };
   }
 }

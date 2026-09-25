@@ -100,6 +100,19 @@ describe.runIf(!!FERRET && !!PG_BIN)("MongoDB compatibility layer in front of Fe
     expect(engine.stats("docs_site")!.emulated).toBe(before);
   }, 60_000);
 
+  it("also stands in for find, distinct and count when FerretDB can't run them", async () => {
+    const c = client.db("site").collection("visitors");
+    const before = engine.stats("docs_site")!.emulated;
+    // $expr compares two fields of the same document: not implemented in FerretDB 1.x.
+    const heavy = await c.find({ $expr: { $gt: ["$totalEngagementMs", { $multiply: ["$visitCount", 10_000] }] } }, { projection: { _id: 0, city: 1 } }).sort({ city: 1 }).toArray();
+    // Engagement above 10 s per visit: Cairo (45 s / 4 visits), the null city (90 s / 7), Unknown (31 s / 1).
+    expect(heavy).toEqual([{ city: null }, { city: "Cairo" }, { city: "Unknown" }]);
+    const counted = await c.countDocuments({ $expr: { $gte: ["$visitCount", 3] } });
+    const owners = await c.distinct("owner", { $expr: { $gt: ["$visitCount", 1] } });
+    expect({ counted, owners: owners.length }).toEqual({ counted: 2, owners: 2 });
+    expect(engine.stats("docs_site")!.emulated).toBeGreaterThan(before);
+  }, 60_000);
+
   it("never emulates writing stages", async () => {
     const out = client
       .db("site")
