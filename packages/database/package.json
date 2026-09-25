@@ -1,0 +1,22 @@
+{
+  "name": "@nexus/database",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@nexus/detection": "0.1.0",
+    "@nexus/security": "0.1.0",
+    "@nexus/shared": "0.1.0",
+    "@nexus/state": "0.1.0",
+    "bson": "7.3.3",
+    "mingo": "7.2.4",
+    "mongodb": "^7.6.0",
+    "pg": "^8.23.0"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.23.1"
+  }
+}

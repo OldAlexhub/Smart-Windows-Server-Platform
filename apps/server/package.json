@@ -1,0 +1,31 @@
+{
+  "name": "@nexus/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@fastify/cookie": "^11.1.2",
+    "@fastify/multipart": "^10.1.2",
+    "@fastify/static": "^10.1.4",
+    "@nexus/ai": "0.1.0",
+    "@nexus/backups": "0.1.0",
+    "@nexus/database": "0.1.0",
+    "@nexus/deployment": "0.1.0",
+    "@nexus/detection": "0.1.0",
+    "@nexus/hardware": "0.1.0",
+    "@nexus/logs": "0.1.0",
+    "@nexus/monitoring": "0.1.0",
+    "@nexus/network": "0.1.0",
+    "@nexus/plugins": "0.1.0",
+    "@nexus/runtime": "0.1.0",
+    "@nexus/security": "0.1.0",
+    "@nexus/shared": "0.1.0",
+    "@nexus/state": "0.1.0",
+    "@nexus/storage": "0.1.0",
+    "fastify": "^5.12.5",
+    "zod": "^4.6.5"
+  }
+}

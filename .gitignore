@@ -1,0 +1,70 @@
+# ---------------------------------------------------------------- dependencies
+node_modules/
+.pnpm-store/
+
+# ---------------------------------------------------------------- build output
+# Installer, portable copy and staged app (rebuild with: node scripts/build.mjs)
+dist/
+out/
+build/
+coverage/
+*.tsbuildinfo
+.vite/
+apps/ui/dist/
+# Tauri desktop shell (Rust build output and generated schemas)
+target/
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/gen/
+
+# ---------------------------------------------------------------- downloaded components
+# PostgreSQL, Caddy, Python, FerretDB, DuckDB extensions, WinSW: fetched and
+# sha256-checked from components.json by scripts/fetch-components.mjs
+/vendor/
+
+# ---------------------------------------------------------------- local Nexus data
+# Development server state: settings database, vault key, local sign-in token, logs
+/.nexus-dev/
+# Portable copy data (if one is unzipped inside the repo)
+NexusPortable/
+**/data/nexus/
+# Backups and in-progress backup files
+*.nxb
+*.nxb.part
+.staging/
+
+# ---------------------------------------------------------------- secrets and keys
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+*.crt
+local-access.token
+master.key
+
+# ---------------------------------------------------------------- Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# ---------------------------------------------------------------- logs
+*.log
+npm-debug.log*
+
+# ---------------------------------------------------------------- editors and OS
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------------------------------------------------------------- local AI assistant settings
+.claude/settings.local.json

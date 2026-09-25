@@ -1,0 +1,10 @@
+Package: nexusR
+Type: Package
+Title: Nexus Pipeline Helpers for R Scripts
+Version: 1.0.0
+Description: Lets R scripts running in a Nexus pipeline receive the incoming data, parameters and
+    secrets, and hand their result to the next step. Data moves between steps as Parquet files.
+License: MIT
+Encoding: UTF-8
+Imports: jsonlite, nanoparquet
+Suggests: arrow

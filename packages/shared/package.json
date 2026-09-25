@@ -1,0 +1,13 @@
+{
+  "name": "@nexus/shared",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./brand": "./src/brand.ts",
+    "./format": "./src/format.ts",
+    "./contracts": "./src/contracts.ts",
+    "./errors": "./src/errors.ts"
+  }
+}

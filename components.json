@@ -1,0 +1,90 @@
+{
+  "$comment": "Third-party runtime components Nexus bundles or installs. Versions are pinned; sha256 is verified after download. Update one component at a time.",
+  "components": {
+    "postgresql": {
+      "version": "18.4-1",
+      "license": "PostgreSQL License",
+      "url": "https://get.enterprisedb.com/postgresql/postgresql-18.4-1-windows-x64-binaries.zip",
+      "sha256": "7effe34c0bf89027b3f171447d351cbc460f4566c8d0f643daec67f140787858",
+      "archive": "zip",
+      "extract": [
+        "pgsql/bin",
+        "pgsql/lib",
+        "pgsql/share"
+      ],
+      "stripPrefix": "pgsql"
+    },
+    "caddy": {
+      "version": "2.11.4",
+      "license": "Apache-2.0",
+      "url": "https://github.com/caddyserver/caddy/releases/download/v2.11.4/caddy_2.11.4_windows_amd64.zip",
+      "sha256": "1708333f79e274c7697285afe6d592ab39314e0b131e9ec6bea08ad27df62ebf",
+      "archive": "zip",
+      "extract": [
+        "caddy.exe",
+        "LICENSE"
+      ]
+    },
+    "python": {
+      "version": "3.12.14+20260924",
+      "license": "PSF-2.0 (CPython); bundled libraries OpenSSL Apache-2.0, libffi MIT, zlib, bzip2, xz, sqlite public domain / BSD — python-build-standalone (MPL-2.0 build scripts)",
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260924/cpython-3.12.14%2B20260924-x86_64-pc-windows-msvc-install_only_stripped.tar.gz",
+      "sha256": "c5bf8edfe858c1df9891be498b5bbc8761d383df5b9790658b088fea4870433a",
+      "archive": "tar.gz",
+      "stripPrefix": "python"
+    },
+    "winsw": {
+      "version": "2.12.0",
+      "license": "MIT",
+      "url": "https://github.com/winsw/winsw/releases/download/v2.12.0/WinSW-x64.exe",
+      "sha256": "05b82d46ad331cc16bdc00de5c6332c1ef818df8ceefcd49c726553209b3a0da",
+      "archive": "exe",
+      "fileName": "WinSW-x64.exe"
+    },
+    "duckdb-extensions": {
+      "version": "1.5.5",
+      "license": "MIT (DuckDB Foundation, signed official extensions)",
+      "files": [
+        {
+          "fileName": "excel.duckdb_extension",
+          "url": "https://extensions.duckdb.org/v1.5.5/windows_amd64/excel.duckdb_extension.gz",
+          "sha256": "a50d8bbb8d37b036ea7366206c082dc8b90f4f902f7d5799f028bc07d41a995d"
+        },
+        {
+          "fileName": "postgres_scanner.duckdb_extension",
+          "url": "https://extensions.duckdb.org/v1.5.5/windows_amd64/postgres_scanner.duckdb_extension.gz",
+          "sha256": "65b31f002c70ac5f812d293b8552b977d1c0e6752d0a1127176454c8184ed001"
+        },
+        {
+          "fileName": "sqlite_scanner.duckdb_extension",
+          "url": "https://extensions.duckdb.org/v1.5.5/windows_amd64/sqlite_scanner.duckdb_extension.gz",
+          "sha256": "b6139c7f3b40a1b3ba5ef605e4590eda4a55e4e8deefc8182a2644e4a5797f69"
+        }
+      ]
+    },
+    "ferretdb": {
+      "version": "1.24.2",
+      "license": "Apache-2.0",
+      "build": {
+        "source": {
+          "url": "https://github.com/FerretDB/FerretDB/archive/refs/tags/v1.24.2.tar.gz",
+          "sha256": "c4550f2b65e0e881b63c076351f09c95defe96797bec7fec6d5ed509192b60b0"
+        },
+        "go": {
+          "version": "1.27.1",
+          "license": "BSD-3-Clause",
+          "url": "https://go.dev/dl/go1.27.1.windows-amd64.zip",
+          "sha256": "a3911b5e0e1b1053f25ed0675f4c1c6aad1e2bfcf253df2b9be4caabd2edd95d"
+        },
+        "writeFiles": {
+          "build/version/version.txt": "v1.24.2"
+        },
+        "package": "./cmd/ferretdb",
+        "output": "ferretdb.exe",
+        "include": [
+          "LICENSE"
+        ]
+      }
+    }
+  }
+}

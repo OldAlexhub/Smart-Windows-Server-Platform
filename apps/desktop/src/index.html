@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Nexus Server</title>
+    <style>
+      :root { --page: #f9f9f7; --card: #fcfcfb; --ink: #0b0b0b; --muted: #52514e; --accent: #5b6cff; --bad: #b02a2a; }
+      @media (prefers-color-scheme: dark) { :root { --page: #0d0d0d; --card: #1a1a19; --ink: #fff; --muted: #c3c2b7; --accent: #7684ff; --bad: #e66767; } }
+      html, body { height: 100%; margin: 0; }
+      body { background: var(--page); color: var(--ink); font: 15px/1.5 system-ui, "Segoe UI", sans-serif; display: grid; place-items: center; }
+      .card { background: var(--card); border: 1px solid rgba(128,128,128,.18); border-radius: 16px; padding: 36px 40px; width: min(420px, calc(100vw - 32px)); text-align: center; box-sizing: border-box; }
+      .mark { width: 56px; height: 56px; margin: 0 auto 16px; border-radius: 16px; background: var(--accent); display: grid; place-items: center; }
+      h1 { font-size: 20px; margin: 0 0 6px; }
+      p { color: var(--muted); margin: 0; }
+      .spin { width: 22px; height: 22px; margin: 18px auto 0; border: 3px solid rgba(128,128,128,.25); border-top-color: var(--accent); border-radius: 50%; animation: s 1s linear infinite; }
+      @keyframes s { to { transform: rotate(360deg); } }
+      .err { color: var(--bad); }
+      button { margin-top: 18px; font: inherit; font-weight: 600; color: #fff; background: var(--accent); border: 0; border-radius: 10px; padding: 10px 20px; cursor: pointer; }
+      [hidden] { display: none !important; }
+    </style>
+  </head>
+  <body>
+    <main class="card" aria-live="polite">
+      <div class="mark"><svg width="28" height="28" viewBox="0 0 32 32"><path d="M9 22V10l14 12V10" stroke="#fff" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round" /></svg></div>
+      <h1 id="title">Opening Nexus…</h1>
+      <p id="detail">Connecting to your server.</p>
+      <div class="spin" id="spin"></div>
+      <button id="retry" hidden>Try Again</button>
+    </main>
+    <script>
+      // The native shell finds the background service, signs in with the local token,
+      // and returns the control-center address. Nothing here talks to the internet.
+      const $ = (id) => document.getElementById(id);
+      async function connect() {
+        $("retry").hidden = true;
+        $("spin").hidden = false;
+        $("title").textContent = "Opening Nexus…";
+        $("detail").textContent = "Connecting to your server.";
+        $("detail").classList.remove("err");
+        try {
+          const url = await window.__TAURI__.core.invoke("connect");
+          location.replace(url);
+        } catch (e) {
+          $("spin").hidden = true;
+          $("title").textContent = "Nexus isn't running yet";
+          $("detail").textContent = String(e);
+          $("detail").classList.add("err");
+          $("retry").hidden = false;
+        }
+      }
+      $("retry").addEventListener("click", connect);
+      connect();
+    </script>
+  </body>
+</html>
