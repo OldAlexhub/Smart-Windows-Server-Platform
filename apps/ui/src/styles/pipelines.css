@@ -392,3 +392,25 @@ button.chip { cursor: pointer; }
 .copy-steps li { display: flex; justify-content: space-between; gap: 12px; padding: 8px 10px; border-radius: 8px; background: var(--surface-sunken); }
 .copy-steps li.pending { opacity: 0.6; }
 .copy-steps li.failed { color: var(--critical); }
+
+/* Updates card: how new versions reach an app. */
+.delivery-steps { list-style: none; counter-reset: step; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; padding: 0; margin: 0 0 16px; }
+.delivery-steps li { counter-increment: step; display: flex; flex-direction: column; gap: 2px; padding: 10px 12px 10px 40px; position: relative; border-radius: var(--radius-m); background: var(--surface-sunken); font-size: 13px; }
+.delivery-steps li::before { content: counter(step); position: absolute; left: 12px; top: 10px; width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; font-size: 12px; font-weight: 600; background: var(--accent-soft); color: var(--accent); }
+.delivery-steps li span { color: var(--text-muted); }
+.delivery-source { display: flex; gap: 10px; align-items: flex-start; margin-bottom: 14px; }
+.delivery-source > span { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.delivery-source code { overflow-wrap: anywhere; }
+.delivery-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+.delivery-actions .small { flex: 1; min-width: 220px; }
+.delivery-key { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
+.delivery-key > span:first-child { display: flex; gap: 10px; align-items: flex-start; }
+.delivery-key > span:first-child > span { display: flex; flex-direction: column; }
+.delivery-key small { color: var(--text-muted); }
+.toggle-row strong svg { vertical-align: -2px; margin-right: 4px; }
+.warn-text { color: var(--critical-text); }
+.accent-text { color: var(--accent); }
+.command-block { margin-top: 10px; border: 1px solid var(--border); border-radius: var(--radius-m); overflow: hidden; }
+.command-head { display: flex; align-items: center; justify-content: space-between; padding: 6px 10px; background: var(--surface-sunken); font-size: 13px; }
+.command-block pre { margin: 0; padding: 10px 12px; font-size: 12px; white-space: pre-wrap; word-break: break-all; }
+@media (max-width: 720px) { .delivery-steps { grid-template-columns: 1fr; } }

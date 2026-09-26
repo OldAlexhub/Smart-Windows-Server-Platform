@@ -186,8 +186,16 @@ You **don't** need to stop the app first.
 - **Who can access / Domain name** (app → **Settings** → **External Access**): press **Save**. It works straight away; no restart needed.
 - **Application Settings** (like an API key): type the **Name** and **Value** → **Add Setting**, or **Remove** one. The app reads its settings when it starts, so press **Restart now** in the green message to use the new value.
 
-### Update an app
-Change the files in the app's folder, then go to the **Dashboard** and press **Refresh** (top right). Nexus looks for changes your running apps don't have yet and shows an **Updates ready** card: press **Deploy update** for one app, or **Apply all**. (You can also press **Deploy Latest** on the app's page.) Nexus keeps the current release so you can **Roll Back** if needed.
+### Update an app (it never goes offline)
+When you update an app, Nexus starts the new version **next to** the old one. Visitors move to the new version only once it answers. If the new version is broken, the old one just keeps running and nobody notices. It's like opening a new checkout lane before closing the old one.
+
+There are four ways to send an update. They all work this way.
+1. **Change the files in the app's folder**, then **Dashboard → Refresh → Deploy update** (or **Apply all**). You can also press **Deploy Latest** on the app's page.
+2. **Let it happen by itself.** On the app's **Deployments** tab, tick **Update automatically when files in this folder change**. Save your code (or run `git pull` in the folder) and about half a minute later it's live.
+3. **Upload a zip.** On the **Deployments** tab, press **Upload New Version (.zip)** and choose a zip of your project folder. Leave out `node_modules` and `.venv`, because Nexus installs those itself. You can zip the folder itself or the folder around it; both work.
+4. **Push it from your laptop.** On the **Deployments** tab, press **Create Deploy Key**. Nexus shows the key once, with a ready-made command to copy. Run it in your project folder on your laptop (with WireGuard on) and the new version goes live. **Turn Off** stops the key working.
+
+Every version is kept. If something is wrong, open **Deployments**, pick an older version and press **Roll Back** (also without going offline).
 
 ### Remove (delete) an app
 1. Open the app → **Overview** → **Controls** → **Remove** (or **Settings** tab → **Remove Application** at the bottom).

@@ -107,6 +107,7 @@ export async function startBackground(ctx: NexusContext, s: NexusServices): Prom
   if (!ctx.setupCompleted) return;
   await s.plugins.startEnabled();
   await s.apps.autostart();
+  s.apps.startAutoDeploy();
   void s.privateNetwork.resume().catch((e) => ctx.log.warn("private network could not resume", { err: e as Error }));
   void s.databaseLinks.resume().catch((e) => ctx.log.warn("database links could not resume", { err: e as Error }));
   s.backups.startScheduler();

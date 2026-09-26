@@ -65,9 +65,10 @@ const EXCLUDE_FILE = /^\.env(\.(local|development|production|test))?(\.local)?$/
  * Files in an app's folder changed after `since` — only those a new release would copy (the same
  * exclusions as a deploy), so "Update" only appears when redeploying would actually change something.
  */
-export function sourceChangesSince(root: string, since: Date, maxFiles = 50_000): { changed: string[]; scanned: number } {
+export function sourceChangesSince(root: string, since: Date, maxFiles = 50_000): { changed: string[]; scanned: number; newestMs: number } {
   const changed: string[] = [];
   let scanned = 0;
+  let newestMs = 0;
   const walk = (dir: string, rel: string) => {
     let entries: Dirent[];
     try {
@@ -83,7 +84,11 @@ export function sourceChangesSince(root: string, since: Date, maxFiles = 50_000)
       } else if (e.isFile() && !EXCLUDE_FILE.test(e.name)) {
         scanned++;
         try {
-          if (statSync(join(dir, e.name)).mtimeMs > since.getTime()) changed.push(r);
+          const mtime = statSync(join(dir, e.name)).mtimeMs;
+          if (mtime > since.getTime()) {
+            changed.push(r);
+            newestMs = Math.max(newestMs, mtime);
+          }
         } catch {
           // removed while scanning
         }
@@ -91,7 +96,7 @@ export function sourceChangesSince(root: string, since: Date, maxFiles = 50_000)
     }
   };
   walk(root, "");
-  return { changed, scanned };
+  return { changed, scanned, newestMs };
 }
 
 export interface DeploymentManagerOptions {

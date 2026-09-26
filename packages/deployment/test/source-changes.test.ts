@@ -22,7 +22,7 @@ describe("changes waiting to be deployed", () => {
     write("server.js", old);
     write("public/index.html", old);
     const release = new Date("2026-06-01T00:00:00Z");
-    expect(sourceChangesSince(root, release)).toEqual({ changed: [], scanned: 2 });
+    expect(sourceChangesSince(root, release)).toEqual({ changed: [], scanned: 2, newestMs: 0 });
 
     const now = new Date();
     write("public/index.html", now);

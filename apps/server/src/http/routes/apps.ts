@@ -1,12 +1,14 @@
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { createWriteStream, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join, parse } from "node:path";
+import { Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { z } from "zod";
 import { describeComponent } from "@nexus/detection";
 import { authorize, visibleAppIds } from "@nexus/security";
 import { NexusError } from "@nexus/shared";
 import type { RouteModule } from "../server";
 import { SETTINGS } from "../../context";
-import { requirePermission, requireUser } from "../auth";
+import { isPrivateNetworkRequest, requirePermission, requireUser } from "../auth";
 import type { AppManager } from "../../services/apps";
 
 const DB_FINDING: Record<string, string> = {
@@ -17,6 +19,9 @@ const DB_FINDING: Record<string, string> = {
   sqlite: "SQLite file",
   mssql: "SQL Server database",
 };
+
+/** Largest new version accepted by upload (dependencies are installed by Nexus, not uploaded). */
+const MAX_UPLOAD_BYTES = 2 * 1024 ** 3;
 
 const accessSchema = z.enum(["private", "internet", "authorized", "api"]);
 const PROJECT_MARKERS = ["package.json", "requirements.txt", "pyproject.toml", "manage.py", "index.html", "Pipfile"];
@@ -186,6 +191,122 @@ export function appRoutes(apps: AppManager): RouteModule {
       const user = requirePermission(req, "app.deploy", id);
       ctx.audit.record({ actor: { type: "user", id: user.id, name: user.displayName }, action: "app.redeploy", target: { type: "app", id }, ip: req.clientIp });
       return { jobId: apps.deploy(id).id };
+    });
+
+    // ---------------- delivery: updating apps without downtime ----------------
+
+    /** Saves an uploaded zip (browser form or raw body) next to the app, then puts it live. */
+    const receiveZip = async (appId: string, stream: NodeJS.ReadableStream): Promise<{ jobId: string; files: number }> => {
+      const dir = ctx.deployments!.appDir(appId);
+      mkdirSync(dir, { recursive: true });
+      const file = join(dir, `upload-${Date.now()}.zip`);
+      let bytes = 0;
+      try {
+        await pipeline(
+          stream,
+          new Transform({
+            transform(chunk: Buffer, _enc, cb) {
+              bytes += chunk.length;
+              if (bytes > MAX_UPLOAD_BYTES) cb(NexusError.invalid("That zip file is larger than 2 GB. Leave out node_modules, .venv and build output — Nexus installs those itself."));
+              else cb(null, chunk);
+            },
+          }),
+          createWriteStream(file),
+        );
+        if (!bytes) throw NexusError.invalid("No file was received.");
+        return await apps.uploadSource(appId, file);
+      } finally {
+        rmSync(file, { force: true });
+      }
+    };
+
+    // A zip sent as the raw request body (curl --data-binary, Invoke-RestMethod -InFile) is streamed to disk.
+    for (const type of ["application/zip", "application/x-zip-compressed"]) {
+      if (!app.hasContentTypeParser(type)) app.addContentTypeParser(type, (_req, payload, done) => done(null, payload));
+    }
+
+    app.get("/api/v1/apps/:id/delivery", async (req) => {
+      const id = (req.params as { id: string }).id;
+      requirePermission(req, "app.deploy", id);
+      return apps.delivery(id);
+    });
+
+    app.put("/api/v1/apps/:id/auto-deploy", async (req) => {
+      const id = (req.params as { id: string }).id;
+      const user = requirePermission(req, "app.deploy", id);
+      const { enabled } = z.object({ enabled: z.boolean() }).parse(req.body);
+      apps.setAutoDeploy(id, enabled);
+      ctx.audit.record({ actor: { type: "user", id: user.id, name: user.displayName }, action: enabled ? "app.auto_deploy.on" : "app.auto_deploy.off", target: { type: "app", id } });
+      return apps.delivery(id);
+    });
+
+    app.post("/api/v1/apps/:id/upload", async (req) => {
+      const id = (req.params as { id: string }).id;
+      const user = requirePermission(req, "app.deploy", id);
+      apps.require(id);
+      const part = await req.file({ limits: { files: 1, fileSize: MAX_UPLOAD_BYTES } });
+      if (!part) throw NexusError.invalid("Choose a .zip file with the new version of your app.");
+      ctx.audit.record({ actor: { type: "user", id: user.id, name: user.displayName }, action: "app.upload", target: { type: "app", id }, details: { file: part.filename }, ip: req.clientIp });
+      return receiveZip(id, part.file);
+    });
+
+    app.post("/api/v1/apps/:id/deploy-key", async (req) => {
+      const id = (req.params as { id: string }).id;
+      const user = requirePermission(req, "app.deploy", id);
+      const key = apps.issueDeployKey(id);
+      ctx.audit.record({ actor: { type: "user", id: user.id, name: user.displayName }, action: "app.deploy_key.issue", target: { type: "app", id } });
+      return key;
+    });
+
+    app.delete("/api/v1/apps/:id/deploy-key", async (req) => {
+      const id = (req.params as { id: string }).id;
+      const user = requirePermission(req, "app.deploy", id);
+      apps.revokeDeployKey(id);
+      ctx.audit.record({ actor: { type: "user", id: user.id, name: user.displayName }, action: "app.deploy_key.revoke", target: { type: "app", id } });
+      return { ok: true };
+    });
+
+    /**
+     * Deploy hook for other computers and build scripts. Authenticated by the app's deploy key
+     * (Authorization: Bearer nxd_…). With a zip body (Content-Type: application/zip, or a form
+     * upload) that version goes live; with no body the app's folder is redeployed. Accepted from this
+     * computer and the private network only — never straight from the internet.
+     */
+    app.post("/api/v1/hooks/deploy/:id", async (req, reply) => {
+      const id = (req.params as { id: string }).id;
+      const auth = String(req.headers.authorization ?? "");
+      const key = auth.toLowerCase().startsWith("bearer ") ? auth.slice(7).trim() : String(req.headers["x-nexus-deploy-key"] ?? "");
+      if (req.remote && !isPrivateNetworkRequest(ctx, req)) {
+        return reply.code(403).send({ error: { code: "forbidden", message: "Deploy keys work from this computer or your private network (WireGuard) only.", problem: null } });
+      }
+      if (!apps.verifyDeployKey(id, key)) {
+        ctx.audit.record({ actor: { type: "system", id: "deploy-key", name: "Deploy key" }, action: "app.deploy_hook", outcome: "denied", target: { type: "app", id }, ip: req.clientIp });
+        return reply.code(401).send({ error: { code: "unauthorized", message: "Unknown application or wrong deploy key.", problem: null } });
+      }
+      ctx.audit.record({ actor: { type: "system", id: "deploy-key", name: "Deploy key" }, action: "app.deploy_hook", target: { type: "app", id }, ip: req.clientIp });
+      const type = String(req.headers["content-type"] ?? "");
+      let result: { jobId: string; files?: number };
+      if (type.startsWith("multipart/")) {
+        const part = await req.file({ limits: { files: 1, fileSize: MAX_UPLOAD_BYTES } });
+        if (!part) throw NexusError.invalid("Send the .zip file in the form field \"file\".");
+        result = await receiveZip(id, part.file);
+      } else if (Number(req.headers["content-length"] ?? 0) > 0 || req.headers["transfer-encoding"]) {
+        result = await receiveZip(id, req.body as NodeJS.ReadableStream);
+      } else {
+        result = { jobId: apps.deploy(id).id };
+      }
+      return reply.code(202).send({ ...result, status: "deploying", follow: `/api/v1/hooks/deploy/${id}/jobs/${result.jobId}` });
+    });
+
+    /** Progress of a deploy started with the deploy key (same key). */
+    app.get("/api/v1/hooks/deploy/:id/jobs/:jobId", async (req, reply) => {
+      const { id, jobId } = req.params as { id: string; jobId: string };
+      const auth = String(req.headers.authorization ?? "");
+      const key = auth.toLowerCase().startsWith("bearer ") ? auth.slice(7).trim() : String(req.headers["x-nexus-deploy-key"] ?? "");
+      if ((req.remote && !isPrivateNetworkRequest(ctx, req)) || !apps.verifyDeployKey(id, key)) return reply.code(401).send({ error: { code: "unauthorized", message: "Unknown application or wrong deploy key.", problem: null } });
+      const job = ctx.jobs.get(jobId);
+      if (!job || apps.jobApp(jobId) !== id) return reply.code(404).send({ error: { code: "not_found", message: "No such deployment.", problem: null } });
+      return { status: job.status, steps: job.steps.map((s) => ({ label: s.label, status: s.status, detail: s.detail ?? null })), problem: job.problem ?? null };
     });
 
     app.post("/api/v1/apps/:id/rollback", async (req) => {

@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { DEFAULT_POLICY } from "@nexus/backups";
 import { analyzeProject, parseDotenv, primary, type ProjectAnalysis } from "@nexus/detection";
@@ -131,6 +132,16 @@ export interface VerificationResult {
 }
 
 const AUTO_RESOURCES: ResourcePolicy = { cpuLimitPercent: "auto", memoryLimitMb: "auto", priority: "normal" };
+/** Automatic updates: how often app folders are checked, and how long files must stay unchanged first. */
+const AUTO_DEPLOY_CHECK_MS = 15_000;
+const AUTO_DEPLOY_QUIET_MS = 20_000;
+const AUTO_DEPLOY = "autoDeploy";
+const DEPLOY_KEY = (appId: string) => `deployKey:${appId}`;
+const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
+/** How long the previous version keeps finishing requests after visitors are switched to the new one. */
+const SWITCH_DRAIN_MS = 5_000;
+/** An app that ignores PORT fails like this when its fixed port is already taken. */
+const PORT_TAKEN = /EADDRINUSE|address already in use|Only one usage of each socket address/i;
 const secretKey = (appId: string, name: string) => `app:${appId}/env/${name}`;
 
 /**
@@ -142,6 +153,12 @@ export class AppManager {
   /** When each app's settings last changed (to tell whether the running process has them). */
   private readonly settingsChangedAt = new Map<string, number>();
   private readonly monitors = new Map<string, HealthMonitor>();
+  /** The latest deploy job per app, so two updates of one app never run at once. */
+  private readonly deployJobs = new Map<string, string>();
+  private readonly jobApps = new Map<string, string>();
+  /** Automatic updates: the newest file change already tried per app (not retried after a failure). */
+  private readonly autoAttempted = new Map<string, number>();
+  private autoTimer: NodeJS.Timeout | null = null;
 
   constructor(
     private readonly ctx: NexusContext,
@@ -246,7 +263,8 @@ export class AppManager {
     const pn = this.ctx.settings.get<{ enabled?: boolean; subnet?: { base: string } | null }>("privateNetwork", {});
     const pnPort = this.ctx.ports.get("private-network", appId);
     if (pn.enabled && pn.subnet && pnPort) out.push({ kind: "private-network", label: "Your private network", url: `http://${pn.subnet.base}.1:${pnPort}`, note: "From your phone or laptop with WireGuard on" });
-    const port = this.ctx.ports.get(`app:${appId}`, "http");
+    // The port of the version running now (updates alternate between the app's two ports).
+    const port = this.supervisors.get(appId)?.port ?? this.ctx.ports.get(`app:${appId}`, "http");
     if (port) out.push({ kind: "direct", label: "The app itself", url: `http://127.0.0.1:${port}`, note: "The port Nexus gives the app, on this computer only" });
     return out;
   }
@@ -286,7 +304,140 @@ export class AppManager {
       { key: "verify", label: "Testing everything" },
       { key: "backups", label: "Turning on backups" },
     ];
-    return this.ctx.jobs.start("deploy", `Deploying ${app.name}`, steps, (job) => this.runDeploy(appId, job, opts));
+    const running = this.deployJobs.get(appId);
+    if (running && this.ctx.jobs.get(running)?.status === "running") throw NexusError.conflict(`${app.name} is already being updated. Wait for that update to finish.`);
+    const job = this.ctx.jobs.start("deploy", `Deploying ${app.name}`, steps, (job) => this.runDeploy(appId, job, opts));
+    this.deployJobs.set(appId, job.id);
+    this.jobApps.set(job.id, appId);
+    return job;
+  }
+
+  /** Which app a deploy job belongs to (so a deploy key only sees its own app's progress). */
+  jobApp(jobId: string): string | null {
+    return this.jobApps.get(jobId) ?? null;
+  }
+
+  // ------------------------------------------------------------------ delivery (updates without downtime)
+
+  /** Where uploaded versions of an app are kept. Once an app is updated by upload, this is its code. */
+  uploadedSourceDir(appId: string): string {
+    return join(this.ctx.deployments!.appDir(appId), "source");
+  }
+
+  /**
+   * Puts a new version of the app's code in place from a .zip (from the browser, or a deploy key
+   * from another computer) and deploys it without downtime. The zip may hold the project itself or
+   * one folder with the project in it (as GitHub's "Download ZIP" does).
+   */
+  async uploadSource(appId: string, zipFile: string): Promise<{ jobId: string; files: number }> {
+    const app = this.require(appId);
+    const running = this.deployJobs.get(appId);
+    if (running && this.ctx.jobs.get(running)?.status === "running") throw NexusError.conflict(`${app.name} is already being updated. Wait for that update to finish.`);
+    const appDir = this.ctx.deployments!.appDir(appId);
+    const incoming = join(appDir, `incoming-${Date.now()}`);
+    mkdirSync(incoming, { recursive: true });
+    try {
+      await extractZip(zipFile, incoming);
+      // A single folder at the top (GitHub's "Download ZIP"): the project is inside it.
+      let root = incoming;
+      for (;;) {
+        const entries = readdirSync(root, { withFileTypes: true }).filter((e) => !e.name.startsWith("__MACOSX"));
+        if (entries.length === 1 && entries[0]!.isDirectory()) root = join(root, entries[0]!.name);
+        else break;
+      }
+      const files = countFiles(root);
+      if (!files) throw NexusError.invalid("That zip file is empty.");
+      const analysis = this.analyze(root);
+      if (!analysis.components.length) throw NexusError.invalid(`Nexus couldn't recognise an application in that zip file. ${analysis.warnings[0] ?? "Zip the folder that holds your package.json or requirements.txt."}`);
+      // Swap in the new code: the old copy is only removed once the new one is in place.
+      const target = this.uploadedSourceDir(appId);
+      const previous = `${target}-previous`;
+      rmSync(previous, { recursive: true, force: true });
+      if (existsSync(target)) renameSync(target, previous);
+      renameSync(root, target);
+      rmSync(previous, { recursive: true, force: true });
+      if (app.sourceDir !== target) this.update(appId, { sourceDir: target });
+      this.ctx.activity.add("info", `A new version of ${app.name} was uploaded (${files.toLocaleString()} files). Updating without downtime…`, appId);
+      return { jobId: this.deploy(appId).id, files };
+    } finally {
+      rmSync(incoming, { recursive: true, force: true });
+    }
+  }
+
+  /** A key that lets another computer (your laptop, a build script) push updates to this app. */
+  issueDeployKey(appId: string): { key: string; url: string } {
+    this.require(appId);
+    const key = `nxd_${randomBytes(24).toString("base64url")}`;
+    this.ctx.settings.set(DEPLOY_KEY(appId), { hash: sha256(key), createdAt: new Date().toISOString() });
+    return { key, url: `/api/v1/hooks/deploy/${appId}` };
+  }
+
+  revokeDeployKey(appId: string): void {
+    this.ctx.settings.delete(DEPLOY_KEY(appId));
+  }
+
+  verifyDeployKey(appId: string, key: string): boolean {
+    const k = this.get(appId) ? this.ctx.settings.get<{ hash: string } | null>(DEPLOY_KEY(appId), null) : null;
+    if (!k || !key) return false;
+    const a = Buffer.from(k.hash, "hex");
+    const b = Buffer.from(sha256(key), "hex");
+    return a.length === b.length && timingSafeEqual(a, b);
+  }
+
+  /** How updates reach this app: where its code comes from, automatic updates and the deploy key. */
+  delivery(appId: string) {
+    const app = this.require(appId);
+    const key = this.ctx.settings.get<{ createdAt: string } | null>(DEPLOY_KEY(appId), null);
+    const current = this.ctx.deployments?.current(appId);
+    const pending = current && existsSync(app.sourceDir) ? sourceChangesSince(app.sourceDir, new Date(current.createdAt)).changed.length : 0;
+    const job = this.deployJobs.get(appId);
+    return {
+      source: { dir: app.sourceDir, uploaded: app.sourceDir === this.uploadedSourceDir(appId), exists: existsSync(app.sourceDir) },
+      autoDeploy: this.autoDeployEnabled(appId),
+      deployKey: { enabled: !!key, createdAt: key?.createdAt ?? null, url: `/api/v1/hooks/deploy/${appId}` },
+      pendingChanges: pending,
+      updating: job && this.ctx.jobs.get(job)?.status === "running" ? job : null,
+    };
+  }
+
+  autoDeployEnabled(appId: string): boolean {
+    return !!this.ctx.settings.get<Record<string, boolean>>(AUTO_DEPLOY, {})[appId];
+  }
+
+  setAutoDeploy(appId: string, enabled: boolean): void {
+    this.require(appId);
+    const all = { ...this.ctx.settings.get<Record<string, boolean>>(AUTO_DEPLOY, {}) };
+    if (enabled) all[appId] = true;
+    else delete all[appId];
+    this.ctx.settings.set(AUTO_DEPLOY, all);
+  }
+
+  /**
+   * Automatic updates: an app with them on is redeployed (without downtime) once files in its folder
+   * have changed and then stayed quiet for a moment — so a save, a copy or a `git pull` finishes first.
+   * A change whose update failed isn't retried until the files change again.
+   */
+  async autoDeployTick(now = Date.now()): Promise<string[]> {
+    const started: string[] = [];
+    for (const app of this.list()) {
+      if (!this.autoDeployEnabled(app.id) || app.desiredState !== "running") continue;
+      const current = this.ctx.deployments?.current(app.id);
+      const running = this.deployJobs.get(app.id);
+      if (!current || !existsSync(app.sourceDir) || (running && this.ctx.jobs.get(running)?.status === "running")) continue;
+      const { changed, newestMs } = sourceChangesSince(app.sourceDir, new Date(current.createdAt));
+      if (!changed.length || now - newestMs < AUTO_DEPLOY_QUIET_MS || (this.autoAttempted.get(app.id) ?? 0) >= newestMs) continue;
+      this.autoAttempted.set(app.id, newestMs);
+      this.ctx.activity.add("info", `${changed.length} file${changed.length === 1 ? "" : "s"} changed in ${app.name}'s folder. Updating it automatically, without downtime…`, app.id);
+      this.ctx.audit.record({ actor: { type: "system", id: "auto-deploy", name: "Automatic updates" }, action: "app.redeploy", target: { type: "app", id: app.id }, details: { changed: changed.length } });
+      started.push(this.deploy(app.id).id);
+    }
+    return started;
+  }
+
+  startAutoDeploy(): void {
+    if (this.autoTimer) return;
+    this.autoTimer = setInterval(() => void this.autoDeployTick().catch((e) => this.ctx.log.warn("automatic update check failed", { err: e as Error })), AUTO_DEPLOY_CHECK_MS);
+    this.autoTimer.unref();
   }
 
   private async runDeploy(appId: string, job: JobHandle, opts: { data?: CreateAppInput["data"]; first?: boolean }) {
@@ -403,13 +554,20 @@ export class AppManager {
       job.step("migrate", "skipped", mig ? `${mig.description} — available in Settings` : undefined);
     }
 
-    // 6. Start (keep the previous version running until the new one works)
+    // 6. Start: the current version keeps serving until the new one works (no downtime)
     job.step("start", "running");
     const previous = deployments.current(appId);
-    const started = await this.startRelease(appId, release);
+    const wasServing = this.supervisors.get(appId)?.status === "running";
+    const started = await this.startRelease(appId, release, { swap: true, onLog: (l) => job.log(l) });
     if (started !== "running") {
       const tail = this.ctx.logs.search(`app:${appId}`, { level: "problems", limit: 5 }).map((e) => e.message).join("\n");
       const problem = explainError(tail || this.supervisors.get(appId)?.detail || "", { appName: app.name, databasePort: this.ctx.postgres?.port ?? null, databaseRunning: true, credentialsValid: true });
+      if (wasServing && this.supervisors.get(appId)?.status === "running") {
+        // Nothing changed for visitors: report the failed update without marking the app broken.
+        throw new NexusError("infrastructure", `The new version of ${app.name} didn't start, so the current version is still running.`, {
+          problem: { ...problem, title: "The update didn't start (your app is still running the previous version)" },
+        });
+      }
       if (previous && previous.id !== release.id) {
         job.log("The new version didn't start; going back to the previous version.");
         await this.startRelease(appId, previous);
@@ -445,50 +603,140 @@ export class AppManager {
 
   // ------------------------------------------------------------------ run
 
-  private async startRelease(appId: string, release: DeploymentRecord): Promise<AppStatus> {
+  /**
+   * Runs a release. With `swap` and the app already running, the update causes no downtime: the new
+   * version starts next to the old one on the app's other port, and only once it answers does the
+   * gateway switch to it; the old one then finishes its requests and stops. If the new version
+   * doesn't come up, the old one was never touched. Apps that ignore PORT and always use the same
+   * port can't run twice, so for them Nexus falls back to stop-then-start.
+   */
+  private async startRelease(appId: string, release: DeploymentRecord, opts: { swap?: boolean; onLog?: (line: string) => void } = {}): Promise<AppStatus> {
     const app = this.require(appId);
     const main = primary(app.analysis.components);
-    const deployments = this.ctx.deployments!;
-    // Static sites have no process; the gateway serves them.
+    const log = opts.onLog ?? (() => {});
+    // Static sites have no process; the gateway serves them (switching to the new folder at once).
     if (!main || !main.start) {
       if (main && (main.role === "static" || main.role === "frontend")) return "running";
       this.update(appId, { problem: { title: `${app.name} can't start`, summary: "Nexus doesn't know how to start this application. Set a start command in Advanced settings.", checks: [] } });
       return "needs_attention";
     }
-    const { port } = await this.ctx.ports.ensureAvailable(`app:${appId}`, "http");
+    const old = this.supervisors.get(appId);
+    const live = opts.swap && old?.status === "running" ? old : null;
+    if (live) {
+      // The app's two ports take turns: the new version gets whichever the old one isn't using.
+      const purpose = live.port === this.ctx.ports.get(`app:${appId}`, "http") ? "http-next" : "http";
+      const { port } = await this.ctx.ports.ensureAvailable(`app:${appId}`, purpose);
+      log(`Starting the new version on port ${port} while the current one keeps serving on ${live.port}.`);
+      const output: string[] = [];
+      const next = await this.launch(appId, release, port, (line) => output.length < 200 && output.push(line));
+      const status = await next.start();
+      if (status === "running" && (await this.answers(port, app.analysis.healthPath))) {
+        if (!(await this.switchTo(appId, next, live))) {
+          await next.stop();
+          log("The secure gateway couldn't be updated, so visitors stay on the current version. Nothing changed; try the update again.");
+          return "needs_attention";
+        }
+        log("Visitors are now on the new version. The previous one is finishing its requests.");
+        await new Promise((r) => setTimeout(r, SWITCH_DRAIN_MS));
+        await live.stop();
+        return "running";
+      }
+      await next.stop();
+      if (output.some((l) => PORT_TAKEN.test(l))) {
+        // The app ignores PORT: it can't run twice, so this one update has a short restart.
+        log("This app always uses the same port, so it can't run twice. Restarting it with the new version instead (a few seconds offline).");
+      } else {
+        log("The new version didn't start. The current version kept running, so nothing changed for visitors.");
+        this.ctx.logs.write(`app:${appId}`, "system", "An update didn't start; the previous version is still running.");
+        return status === "running" ? "needs_attention" : status;
+      }
+    }
+
+    // Falling back from a swap: the new version takes over the port the old one frees.
+    const port = live ? live.port : (await this.ctx.ports.ensureAvailable(`app:${appId}`, "http")).port;
+    if (old) {
+      this.monitors.get(appId)?.dispose();
+      await old.stop();
+    }
+    const sup = await this.launch(appId, release, port);
+    this.supervisors.set(appId, sup);
+    const status = await sup.start();
+    this.recordProcess(appId, sup);
+    if (status === "running") this.watch(appId, sup);
+    return status;
+  }
+
+  /** Builds the supervisor for one release on one port (not started yet). */
+  private async launch(appId: string, release: DeploymentRecord, port: number, onLine?: (line: string) => void): Promise<AppSupervisor> {
+    const app = this.require(appId);
+    const main = primary(app.analysis.components)!;
     const env = await this.composeEnv(appId, release, port);
-    const ctxRt = deployments.runtimeFor(release);
-    const resolved = resolveCommand(main.start.command, substituteArgs(main.start.args, { PORT: port }), ctxRt);
+    const resolved = resolveCommand(main.start!.command, substituteArgs(main.start!.args, { PORT: port }), this.ctx.deployments!.runtimeFor(release));
     const cwd = main.path ? join(release.releaseDir, ...main.path.split("/")) : release.releaseDir;
     const config: AppProcessConfig = {
       appId,
       cwd,
       executable: resolved.executable,
       args: resolved.args,
-      env: { ...env, ...(main.start.env ?? {}), PATH: [...resolved.pathDirs, env.PATH].join(";") },
+      env: { ...env, ...(main.start!.env ?? {}), PATH: [...resolved.pathDirs, env.PATH].join(";") },
       port,
       resources: app.resources,
       startupTimeoutMs: 90_000,
     };
-
-    const old = this.supervisors.get(appId);
-    if (old) {
-      this.monitors.get(appId)?.dispose();
-      await old.stop();
-    }
     const choice = await this.ctx.isolation.choose({});
     const sup = new AppSupervisor(config, choice.provider);
-    sup.on("output", (stream, line) => this.ctx.logs.write(`app:${appId}`, stream, line));
-    this.supervisors.set(appId, sup);
+    sup.on("output", (stream, line) => {
+      this.ctx.logs.write(`app:${appId}`, stream, line);
+      onLine?.(line);
+    });
     const redactor = this.ctx.logs.redactor(`app:${appId}`);
     for (const v of Object.values(env)) if (v.length >= 12 && /[A-Za-z]/.test(v) && /\d/.test(v)) redactor.addSecret(v);
+    return sup;
+  }
 
-    const status = await sup.start();
+  /**
+   * Makes `next` the app's running version: the gateway is pointed at it first, then health
+   * watching and process records follow. If the gateway can't be updated, visitors are still being
+   * sent to `previous`, so nothing is switched and false is returned.
+   */
+  private async switchTo(appId: string, next: AppSupervisor, previous: AppSupervisor): Promise<boolean> {
+    this.supervisors.set(appId, next);
+    const gw = await this.gateway.sync();
+    if (!gw.ok && this.gateway.available) {
+      this.supervisors.set(appId, previous);
+      this.ctx.log.warn("update not switched: gateway could not be updated", { appId, error: gw.error });
+      return false;
+    }
+    this.monitors.get(appId)?.dispose();
+    this.monitors.delete(appId);
+    this.recordProcess(appId, next);
+    this.watch(appId, next);
+    return true;
+  }
+
+  private recordProcess(appId: string, sup: AppSupervisor): void {
     if (sup.pid && sup.startedAt) {
       this.ctx.store.run("INSERT INTO app_processes (app_id, pid, started_at) VALUES (?, ?, ?) ON CONFLICT(app_id) DO UPDATE SET pid = excluded.pid, started_at = excluded.started_at", [appId, sup.pid, sup.startedAt]);
     }
-    if (status === "running") this.watch(appId, sup);
-    return status;
+  }
+
+  /**
+   * Whether a freshly started version really serves requests: its health page (or home page)
+   * answers without a server error. Anything below 500 counts — a login redirect or a 404 on "/"
+   * still means the app is up.
+   */
+  private async answers(port: number, healthPath: string | null): Promise<boolean> {
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline) {
+      try {
+        const r = await fetch(`http://127.0.0.1:${port}${healthPath ?? "/"}`, { redirect: "manual", signal: AbortSignal.timeout(5_000) });
+        if (r.status < 500) return true;
+      } catch {
+        // not answering yet
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    return false;
   }
 
   private watch(appId: string, sup: AppSupervisor): void {
@@ -545,7 +793,7 @@ export class AppManager {
     const check = deployments.rollbackCheck(deploymentId);
     if (!check.allowed) throw NexusError.conflict(check.reason ?? "This version can't be restored.");
     if (check.requiresConfirmation && !confirmed) return { status: this.status(appId), requiresConfirmation: check.reason! };
-    const status = await this.startRelease(appId, target);
+    const status = await this.startRelease(appId, target, { swap: true });
     if (status === "running") {
       deployments.activate(deploymentId);
       await this.gateway.sync();
@@ -596,6 +844,8 @@ export class AppManager {
   }
 
   async stopAll(): Promise<void> {
+    if (this.autoTimer) clearInterval(this.autoTimer);
+    this.autoTimer = null;
     for (const m of this.monitors.values()) m.dispose();
     await Promise.all([...this.supervisors.values()].map((s) => s.stop()));
     this.supervisors.clear();
@@ -736,6 +986,8 @@ export class AppManager {
     await this.stop(appId);
     this.ctx.appTokens.revokeAll(appId);
     this.ctx.ports.release(`app:${appId}`);
+    this.revokeDeployKey(appId);
+    this.setAutoDeploy(appId, false);
     // The removed app's own database logins stop working (the data itself is kept).
     if (app.databaseId) await this.ctx.databases?.revokeAppAccess(app.databaseId, appId).catch((e) => this.ctx.log.warn("could not revoke database access", { err: e as Error }));
     if (app.documentDatabaseId) await this.ctx.documents?.revokeAppAccess(app.documentDatabaseId, appId).catch((e) => this.ctx.log.warn("could not revoke document database access", { err: e as Error }));
@@ -894,6 +1146,7 @@ export class AppManager {
       desiredState: "running" | "stopped";
       problem: FriendlyProblem | null;
       resources: ResourcePolicy;
+      sourceDir: string;
     }>,
   ): void {
     const cols: string[] = [];
@@ -909,6 +1162,7 @@ export class AppManager {
     if (patch.desiredState) set("desired_state", patch.desiredState);
     if (patch.problem !== undefined) set("problem", patch.problem ? toJson(patch.problem) : null);
     if (patch.resources) set("resources", toJson(patch.resources));
+    if (patch.sourceDir) set("source_dir", patch.sourceDir);
     if (!cols.length) return;
     set("updated_at", new Date().toISOString());
     this.ctx.store.run(`UPDATE apps SET ${cols.join(", ")} WHERE id = ?`, [...vals, appId]);
@@ -933,4 +1187,28 @@ function toRecord(r: AppRow): AppRecord {
     problem: r.problem ? fromJson<FriendlyProblem | null>(r.problem, null) : null,
     createdAt: r.created_at,
   };
+}
+
+/** Unpacks a .zip with Windows' own tar (bsdtar), which refuses paths that would land outside `dir`. */
+function extractZip(zipFile: string, dir: string): Promise<void> {
+  const tar = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe");
+  return new Promise((resolve, reject) => {
+    execFile(existsSync(tar) ? tar : "tar", ["-x", "-f", zipFile, "-C", dir], { windowsHide: true, timeout: 10 * 60_000 }, (err, _out, stderr) => {
+      if (err) reject(NexusError.invalid(`That file couldn't be unpacked. Make sure it's a .zip file. ${String(stderr).split("\n")[0] ?? ""}`.trim()));
+      else resolve();
+    });
+  });
+}
+
+function countFiles(dir: string, limit = 200_000): number {
+  let n = 0;
+  const walk = (d: string) => {
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      if (n >= limit) return;
+      if (e.isDirectory()) walk(join(d, e.name));
+      else if (e.isFile()) n++;
+    }
+  };
+  walk(dir);
+  return n;
 }

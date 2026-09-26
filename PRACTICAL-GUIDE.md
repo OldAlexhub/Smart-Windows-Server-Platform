@@ -78,7 +78,41 @@ Delete its database too: **Databases →** the database → bottom of the page �
 
 ✅ Done when projectOne shows **Running** and **Open Application** shows your site.
 
-> Updating later: change files in `D:\projectOne`, then **Dashboard → Refresh**. The **Updates ready** card offers **Deploy update** (or **Apply all**). If the new version is broken: **Deployments → pick the previous release → Roll Back**.
+> Updating later: change files in `D:\projectOne`, then **Dashboard → Refresh**. The **Updates ready** card offers **Deploy update** (or **Apply all**). If the new version is broken: **Deployments → pick the previous release → Roll Back**. See Recipe 3¾ for updates without downtime, automatic updates and pushing from your laptop.
+
+---
+
+## Recipe 3¾ — Ship updates with no downtime (your own CI/CD)
+**How every update works now:**
+1. The new version starts on the app's second port while the current one keeps serving.
+2. Once the new version answers, the gateway moves visitors over.
+3. The old version finishes the requests it was handling (5 seconds) and stops.
+
+If the new version crashes or doesn't answer, the old one was never touched: the deploy shows *"The update didn't start (your app is still running the previous version)"*. Rollbacks switch the same way.
+
+Pick how updates arrive (app → **Deployments** tab → **Updates** card):
+
+| Way | Best for | What you do |
+|---|---|---|
+| **Update automatically** | Code in a folder on the server (`D:\projectOne`) | Tick the box once. Then save or `git pull` in the folder, and it's live about 30 seconds later. |
+| **Upload New Version (.zip)** | You built it somewhere else | Zip the project (without `node_modules`/`.venv`) and upload. From then on the app's code comes from uploads. |
+| **Deploy key** | Push from your laptop or a script | **Create Deploy Key**, then copy the command it shows. |
+
+**The laptop workflow (deploy key):**
+1. Turn on WireGuard on the laptop (Recipe 5).
+2. In the project folder, run the two lines Nexus showed you:
+   ```powershell
+   tar -a -c -f ..\app.zip --exclude=node_modules --exclude=.venv --exclude=.git .
+   Invoke-RestMethod -Method Post -Uri "http://10.x.x.1:PORT/api/v1/hooks/deploy/projectone" -Headers @{ Authorization = "Bearer nxd_…" } -ContentType "application/zip" -InFile ..\app.zip
+   ```
+3. Save them as `deploy.ps1` in your project, and "deploying" becomes running one file.
+4. The reply has a `follow` address. Open it with the same key to watch the steps.
+
+**Rules worth knowing:**
+- Deploy keys work only from the server itself or over your private network, never straight from the internet. Each app has its own key. **New Key** replaces the old one, and **Turn Off** disables it.
+- Automatic updates wait until files have been quiet for 20 seconds, so a `git pull` finishes first. A version that failed isn't retried until you change the files again.
+- Database changes: both versions share the database for a few seconds. Make table changes that the old version can live with, for example add columns rather than rename them.
+- An app that ignores `PORT` and always uses the same port can't run twice. Nexus notices and restarts it with the new version instead (a few seconds offline). Using `process.env.PORT` / `os.environ["PORT"]` gives you zero downtime.
 
 ---
 

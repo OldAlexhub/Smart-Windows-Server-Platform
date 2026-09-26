@@ -36,6 +36,7 @@ import type { Me } from "../App";
 import { PageHead } from "../components/Layout";
 import { Card, ConfirmByName, Empty, ErrorNote, Meter, Modal, ProblemCard, Spinner, Status, StatusOf } from "../components/ui";
 import { AiExplanationCard, type AiExplanation } from "../components/AiExplanation";
+import { DeliveryCard } from "../components/DeliveryCard";
 import { ApiError, del, get, post, put } from "../lib/api";
 import { useApi, useJob } from "../lib/hooks";
 
@@ -227,11 +228,14 @@ function DeploymentsTab({ app, canDeploy, onJob, reload }: { app: AppDetailData;
   async function rollback(id: string, confirmed = false) { try { const r = await post<{ requiresConfirmation?: string }>(`/apps/${app.id}/rollback`, { deploymentId: id, confirmed }); if (r.requiresConfirmation) setConfirm({ id, reason: r.requiresConfirmation }); else { setConfirm(null); await reload(); } } catch (e) { setError(e as ApiError); } }
   async function deploy() { try { const r = await post<{ jobId: string }>(`/apps/${app.id}/deploy`); onJob(r.jobId); } catch (e) { setError(e as ApiError); } }
   return (
-    <Card title="Deployments" sub="Immutable releases make safe rollback possible" action={canDeploy && <button className="btn primary small" onClick={() => void deploy()}><Code2 size={15} /> Deploy Latest</button>}>
+    <div className="stack">
+    {canDeploy && <DeliveryCard appId={app.id} onJob={onJob} />}
+    <Card title="Deployments" sub="Every version is kept, so you can go back to any of them without downtime" action={canDeploy && <button className="btn primary small" onClick={() => void deploy()}><Code2 size={15} /> Deploy Latest</button>}>
       <ErrorNote error={error} />
       <div className="deployment-list">{app.deployments.map((deployment) => <div className="deployment-row" key={deployment.id}><span className={`deployment-marker ${deployment.status}`}><History size={16} /></span><span className="deployment-main"><strong>{deployment.version}</strong><span className="small muted">{when(deployment.activatedAt ?? deployment.createdAt)}{deployment.commit ? ` · ${deployment.commit.slice(0, 8)}` : ""}</span>{deployment.error && <span className="small" style={{ color: "var(--critical-text)" }}>{deployment.error}</span>}</span><Status tone={deployment.status === "active" ? "good" : deployment.status === "failed" ? "critical" : "neutral"}>{deployment.status === "active" ? "Active" : deployment.status === "failed" ? "Failed" : "Previous"}</Status>{canDeploy && deployment.status !== "active" && deployment.status !== "failed" && <button className="btn small" onClick={() => void rollback(deployment.id)}><RotateCcw size={14} /> Roll Back</button>}</div>)}</div>
       {confirm && <Modal title="Confirm rollback" onClose={() => setConfirm(null)} footer={<><button className="btn" onClick={() => setConfirm(null)}>Cancel</button><button className="btn primary" onClick={() => void rollback(confirm.id, true)}>Roll Back</button></>}><p>{confirm.reason}</p><p className="secondary" style={{ marginTop: 8 }}>Nexus will keep the current release so you can return to it.</p></Modal>}
     </Card>
+    </div>
   );
 }
 
