@@ -1,4 +1,4 @@
-import { ArrowDown, ArrowLeft, ArrowUp, ChevronLeft, ChevronRight, Database, Download, Filter, KeyRound, Pencil, Plus, Search, Table2, Trash2, Upload, X } from "lucide-react";
+import { ArrowDown, ArrowLeft, ArrowUp, ChevronLeft, ChevronRight, Database, Download, Filter, KeyRound, Pencil, Plus, Search, Table2, Trash2, Upload, X, FileText } from "lucide-react";
 import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
 import { Link, useParams } from "react-router";
 import { formatBytes } from "@nexus/shared/format";
@@ -10,6 +10,7 @@ import { ApiError, del, patch, post } from "../lib/api";
 import { useApi } from "../lib/hooks";
 import { AskData } from "../components/AskData";
 import { ImportData } from "../components/ImportData";
+import { TableDesigner } from "../components/TableDesigner";
 import { DeleteDatabase } from "../components/DeleteDatabase";
 import { DatabaseLink } from "../components/DatabaseLink";
 
@@ -72,6 +73,7 @@ export function DatabaseDetail({ me }: { me: Me }) {
   const { id = "" } = useParams();
   const { data: database, error: dbError, loading: dbLoading, reload: reloadDatabase } = useApi<DatabaseSummary>(id ? `/databases/${id}` : null, 15_000);
   const { data: ai } = useApi<{ state: string }>("/ai", 30_000);
+  const [designing, setDesigning] = useState(false);
   const { data: tables, error: tableError, loading: tablesLoading, reload: reloadTables } = useApi<TableSummary[]>(id ? `/databases/${id}/tables` : null, 15_000);
   const [selected, setSelected] = useState<string | null>(null);
   const [page, setPage] = useState(1);
@@ -123,13 +125,13 @@ export function DatabaseDetail({ me }: { me: Me }) {
   return (
     <>
       <div className="app-breadcrumb"><Link to="/databases"><ArrowLeft size={15} /> Databases</Link></div>
-      <PageHead title={<span className="row"><span className="database-icon large"><Database size={22} /></span>{database.name}<StatusOf status={database.status} /></span>} sub={<span className="mono">{database.dbName}</span>} actions={writable && <button className="btn primary" onClick={() => setImporting(true)}><Upload size={16} /> Import Data</button>} />
+      <PageHead title={<span className="row"><span className="database-icon large"><Database size={22} /></span>{database.name}<StatusOf status={database.status} /></span>} sub={<span className="mono">{database.dbName}</span>} actions={<><Link className="btn" to={`/databases/${id}/blueprint`}><FileText size={16} /> Blueprint</Link>{writable && <button className="btn" onClick={() => setDesigning(true)}><Plus size={16} /> New Table</button>}{writable && <button className="btn primary" onClick={() => setImporting(true)}><Upload size={16} /> Import Data</button>}</>} />
       <div className="grid database-summary"><div className="card"><span className="stat-label">Database Size</span><strong className="stat-value">{formatBytes(database.sizeBytes)}</strong></div><div className="card"><span className="stat-label">Tables</span><strong className="stat-value">{database.tableCount}</strong></div><div className="card"><span className="stat-label">Connections</span><strong className="stat-value">{database.connectionCount}</strong></div><div className="card"><span className="stat-label">Backup</span><strong className="stat-value small-value">{database.protected ? "Protected" : "Needs Attention"}</strong></div></div>
       <AskData databaseId={id} aiReady={ai?.state === "ready"} />
       <div className="database-browser card">
         <aside className="table-sidebar">
-          <div className="table-sidebar-head"><strong>Tables</strong><span className="small muted">{tables?.length ?? 0}</span></div>
-          {tablesLoading && !tables ? <Spinner /> : tableError ? <ErrorNote error={tableError} /> : !tables?.length ? <div className="database-empty"><Table2 size={28} /><span>No tables yet</span></div> : tables.map((table) => <button className={`table-choice ${selected === table.name ? "active" : ""}`} key={table.name} onClick={() => setSelected(table.name)}><Table2 size={16} /><span><strong>{table.name}</strong><small>{table.rowEstimate.toLocaleString()} rows · {formatBytes(table.sizeBytes)}</small></span>{!table.editable && <span title="Read only">🔒</span>}</button>)}
+          <div className="table-sidebar-head"><strong>Tables</strong><span className="small muted">{tables?.length ?? 0}</span>{writable && <button className="btn ghost small" title="New table" aria-label="New table" onClick={() => setDesigning(true)}><Plus size={14} /></button>}</div>
+          {tablesLoading && !tables ? <Spinner /> : tableError ? <ErrorNote error={tableError} /> : !tables?.length ? <div className="database-empty"><Table2 size={28} /><span>No tables yet</span>{writable && <button className="btn small primary" onClick={() => setDesigning(true)}><Plus size={14} /> New Table</button>}</div> : tables.map((table) => <button className={`table-choice ${selected === table.name ? "active" : ""}`} key={table.name} onClick={() => setSelected(table.name)}><Table2 size={16} /><span><strong>{table.name}</strong><small>{table.rowEstimate.toLocaleString()} rows · {formatBytes(table.sizeBytes)}</small></span>{!table.editable && <span title="Read only">🔒</span>}</button>)}
         </aside>
         <section className="data-sheet">
           {!selected ? <div className="database-empty"><Table2 size={32} /><span>Choose a table to browse its data.</span></div> : <>
@@ -146,6 +148,7 @@ export function DatabaseDetail({ me }: { me: Me }) {
       {database && me.permissions.includes("server.settings") && <div className="danger-zone"><DeleteDatabase database={database} kind="tables" /></div>}
       {adding && data && base && <AddRow table={data.table} endpoint={`${base}/rows`} onAdded={() => void reload()} onClose={() => setAdding(false)} />}
       {deleting && <Modal title="Delete this row?" onClose={() => setDeleting(null)} footer={<><button className="btn" onClick={() => setDeleting(null)}>Cancel</button><button className="btn danger" style={{ background: "var(--critical)", color: "white" }} onClick={() => void remove()}><Trash2 size={15} /> Delete Row</button></>}><p>This deletes one record from <strong>{selected}</strong>. This cannot be undone.</p><pre className="mono delete-key">{JSON.stringify(deleting, null, 2)}</pre></Modal>}
+      {designing && id && <TableDesigner databaseId={id} onClose={() => setDesigning(false)} onCreated={(table) => { setDesigning(false); setSelected(table); void reloadTables(); void reloadDatabase(); }} />}
       {importing && <ImportData databaseId={id} onClose={() => setImporting(false)} onImported={(table) => { setImporting(false); setSelected(table); void reloadTables(); void reloadDatabase(); }} />}
     </>
   );

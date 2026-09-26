@@ -139,6 +139,7 @@ const tauriConf = JSON.stringify({
     active: true,
     targets: ["nsis"],
     publisher: brand("publisher"),
+    copyright: brand("copyright"),
     shortDescription: brand("tagline"),
     resources: { "../../../dist/app/": "app/" },
     windows: {

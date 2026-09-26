@@ -150,6 +150,13 @@ for (const [n, step] of steps.entries()) {
         if (Date.now() > until) throw new Error(`expectation not met: ${step.expect}`);
         await sleep(150);
       }
+    } else if (step.pdf) {
+      // What "Print / Save as PDF" produces (print styles applied).
+      const { data } = await send("Page.printToPDF", { printBackground: true, preferCSSPageSize: true });
+      const file = join(out, `${step.pdf}.pdf`);
+      writeFileSync(file, Buffer.from(data, "base64"));
+      console.log(`pdf  ${file}`);
+      continue;
     } else if (step.shot) {
       const { data } = await send("Page.captureScreenshot", { format: "png" });
       const file = join(out, `${step.shot}${flag("dark") ? "-dark" : ""}.png`);

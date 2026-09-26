@@ -202,6 +202,12 @@ A database is like a **notebook full of tables**. Each table is a page with rows
 
 - **Make one:** **Databases** → **Create Database** → choose **Tables (recommended)** → type a **Database name** → **Create**.
   (Apps usually get their own database automatically when you add them.)
+- **Make a table (no code):** open the database → **New Table**.
+  1. Pick a starting point (**Customers**, **Products**, **Orders**, **Employees**) or **Blank**, then give the table a name.
+  2. Fill in one row per column: **Column name**, **Type** (Text, Whole number, Money, Yes / no, Date, Email address…), tick **Required**, **Unique** or **Key**, and set a **Default** if you like (for dates, "now" means the moment the row is added).
+  3. To connect it to another table, choose it under **Links to** (for example orders.customer_id → customers → id), and choose what happens when that row is deleted.
+  4. The message at the bottom says **Ready to create** when everything is right (**Show SQL** shows exactly what Nexus will do). Press **Create Table**.
+- **Print a blueprint:** open any database (tables or documents) → **Blueprint**. You get a diagram of the tables and how they link, every column, which apps use the database and how. Press **Print / Save as PDF**.
 - **Look inside:** click the database → pick a table on the left.
 - **Find things:** type in **Filter column…**, use **Next** to see more pages.
 - **Change a value:** click a box, type, then **Save**.
@@ -225,6 +231,8 @@ For apps that store **documents** (bundles of information, like a contact card w
 3. Press **Add Document**, type the information, and **Save Changes**.
 4. Click a document to **Edit document**, or use **Show JSON** to see it in computer form.
 5. **Filter documents** to find things. **Import** brings documents in from a file.
+6. **Moving from another MongoDB (like Atlas)?** Press **Copy from MongoDB**, paste the old database's address, and press **Start Copy**. Everything comes across exactly as it was.
+7. See a **yellow notice** saying ids or dates are "stored as plain text"? That means the data came from a file and lost its special types. Press **Fix types** and it's repaired in a few seconds.
 
 ---
 

@@ -11,6 +11,7 @@ import { Applications } from "./pages/Applications";
 import { ApplicationDetail } from "./pages/ApplicationDetail";
 import { Databases } from "./pages/Databases";
 import { DatabaseDetail } from "./pages/DatabaseDetail";
+import { Blueprint } from "./pages/Blueprint";
 import { DocumentDatabaseDetail } from "./pages/DocumentDatabaseDetail";
 import { Backups } from "./pages/Backups";
 import { Ai } from "./pages/Ai";
@@ -93,6 +94,8 @@ export function App() {
                 <Route path="/apps" element={<Applications canCreate={me.permissions.includes("apps.create")} />} />
                 <Route path="/databases/:id" element={<DatabaseDetail me={me} />} />
                 <Route path="/documents/:id" element={<DocumentDatabaseDetail me={me} />} />
+                <Route path="/databases/:id/blueprint" element={<Blueprint kind="tables" />} />
+                <Route path="/documents/:id/blueprint" element={<Blueprint kind="documents" />} />
                 <Route path="/databases" element={<Databases canCreate={me.permissions.includes("databases.create")} />} />
                 <Route path="/backups" element={<Backups me={me} />} />
                 {me.permissions.includes("pipelines.view") && (

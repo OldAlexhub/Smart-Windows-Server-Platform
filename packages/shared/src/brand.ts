@@ -7,7 +7,8 @@ export const BRAND = {
   productName: "Nexus Server",
   shortName: "Nexus",
   assistantName: "Nexus AI",
-  publisher: "Nexus",
+  publisher: "Old Alex Hub, LLC",
+  copyright: "© 2026 Old Alex Hub, LLC",
   /** Windows service id (no spaces). */
   serviceId: "NexusServer",
   serviceDisplayName: "Nexus Server Core",

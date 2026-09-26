@@ -1,4 +1,4 @@
-import { ArrowLeft, Braces, ChevronLeft, ChevronRight, Download, FileJson, Filter, Pencil, Plus, Search, Trash2, Upload, X } from "lucide-react";
+import { ArrowLeft, Braces, ChevronLeft, ChevronRight, CloudDownload, Download, FileJson, Filter, Pencil, Plus, Search, Trash2, Upload, X, FileText } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router";
 import { formatBytes } from "@nexus/shared/format";
@@ -7,14 +7,27 @@ import type { Me } from "../App";
 import { PageHead } from "../components/Layout";
 import { DeleteDatabase } from "../components/DeleteDatabase";
 import { DatabaseLink } from "../components/DatabaseLink";
-import { ConfirmByName, ErrorNote, Modal, Spinner, StatusOf } from "../components/ui";
+import { ConfirmByName, ErrorNote, Modal, ProblemCard, Spinner, Status, StatusOf } from "../components/ui";
 import { ApiError, del, post, put } from "../lib/api";
-import { useApi } from "../lib/hooks";
+import { useApi, useJob } from "../lib/hooks";
 import { canWrite } from "./DatabaseDetail";
 
 interface CollectionSummary { name: string; documents: number; sizeBytes: number; indexes: number }
 type Doc = Record<string, unknown> & { _id?: unknown };
 interface DocumentPage { documents: Doc[]; total: number; skip: number; limit: number }
+interface TypeCounts { ids: number; references: number; dates: number }
+interface TypeIssues extends TypeCounts { documents: number; scanned: number }
+interface ImportResult { inserted: number; skipped: number; errors: string[]; restored?: TypeCounts }
+
+/** "3 ids, 12 links to other documents and 40 dates" — only the parts that aren't zero. */
+function typeParts(t: TypeCounts): string {
+  const parts = [
+    t.ids ? `${t.ids.toLocaleString()} id${t.ids === 1 ? "" : "s"}` : "",
+    t.references ? `${t.references.toLocaleString()} link${t.references === 1 ? "" : "s"} to other documents` : "",
+    t.dates ? `${t.dates.toLocaleString()} date${t.dates === 1 ? "" : "s"}` : "",
+  ].filter(Boolean);
+  return parts.length > 1 ? `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}` : (parts[0] ?? "");
+}
 
 const PAGE = 20;
 const FILTER_EXAMPLES = ['{"status": "open"}', '{"total": {"$gt": 100}}', '{"name": {"$regex": "^Ada", "$options": "i"}}'];
@@ -68,12 +81,12 @@ function ImportDialog({ collection, endpoint, onDone, onClose }: { collection: s
   const [file, setFile] = useState<File | null>(null);
   const [error, setError] = useState<ApiError | null>(null);
   const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<{ inserted: number; skipped: number; errors: string[] } | null>(null);
+  const [result, setResult] = useState<ImportResult | null>(null);
   async function run() {
     if (!file) return;
     setBusy(true);
     try {
-      const r = await post<{ inserted: number; skipped: number; errors: string[] }>(endpoint, { content: await file.text() });
+      const r = await post<ImportResult>(endpoint, { content: await file.text() });
       setResult(r);
       onDone();
     } catch (e) {
@@ -87,15 +100,66 @@ function ImportDialog({ collection, endpoint, onDone, onClose }: { collection: s
       {result ? (
         <div>
           <p><strong>{result.inserted.toLocaleString()}</strong> {result.inserted === 1 ? "document" : "documents"} added.</p>
+          {result.restored && typeParts(result.restored) && <p className="secondary">Types restored: {typeParts(result.restored)} were text in the file and are now real ObjectIds and dates, so your app works with them as before.</p>}
           {result.skipped > 0 && <p className="secondary">{result.skipped.toLocaleString()} already existed (same _id) and were left unchanged.</p>}
           {result.errors.length > 0 && <ul className="small secondary">{result.errors.map((e, i) => <li key={i}>{e}</li>)}</ul>}
         </div>
       ) : (
         <>
-          <p className="secondary">Choose a <strong>.json</strong> file: an array of documents (as exported by Nexus or mongoexport), or one document per line. Documents that already exist are skipped, so importing twice is safe.</p>
+          <p className="secondary">Choose a <strong>.json</strong> file: an array of documents (as exported by Nexus or mongoexport), or one document per line. Documents that already exist are skipped, so importing twice is safe. Ids and dates saved as text are turned back into ObjectIds and dates automatically.</p>
+          <p className="small muted" style={{ marginTop: 8 }}>Moving a whole database from MongoDB Atlas or another server? Use <strong>Copy from MongoDB</strong> at the top of this page instead — it keeps every type exactly.</p>
           <label className="field" style={{ marginTop: 14 }}>File<input className="input" type="file" accept=".json,.jsonl,.ndjson,application/json" onChange={(e) => setFile(e.target.files?.[0] ?? null)} /></label>
           <ErrorNote error={error} />
         </>
+      )}
+    </Modal>
+  );
+}
+
+/** Copies a whole MongoDB database (Atlas, another server) in, keeping every type exactly. */
+function CopyDialog({ databaseId, onDone, onClose }: { databaseId: string; onDone: () => void; onClose: () => void }) {
+  const [url, setUrl] = useState("");
+  const [dbName, setDbName] = useState("");
+  const [jobId, setJobId] = useState<string | null>(null);
+  const [error, setError] = useState<ApiError | null>(null);
+  const [busy, setBusy] = useState(false);
+  const job = useJob(jobId);
+  const finished = job?.status === "succeeded" || job?.status === "failed";
+  useEffect(() => { if (finished) onDone(); }, [finished]); // eslint-disable-line react-hooks/exhaustive-deps
+  const valid = /^mongodb(\+srv)?:\/\/.+/.test(url.trim());
+  async function start() {
+    setBusy(true);
+    try {
+      const r = await post<{ jobId: string }>(`/documents/${databaseId}/copy-from`, { url: url.trim(), ...(dbName.trim() ? { database: dbName.trim() } : {}) });
+      setJobId(r.jobId);
+      setError(null);
+    } catch (e) {
+      setError(e as ApiError);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <Modal wide title="Copy from another MongoDB" onClose={onClose} footer={jobId ? <button className="btn primary" disabled={!finished} onClick={onClose}>{finished ? "Done" : <Spinner label="Copying…" />}</button> : <><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" disabled={!valid || busy} onClick={() => void start()}>{busy ? <Spinner label="Starting…" /> : "Start Copy"}</button></>}>
+      {!jobId ? (
+        <>
+          <p className="secondary">Paste the connection address of the database you're moving from — MongoDB Atlas, or any MongoDB server. Every collection, document and index is copied with its exact types (ObjectIds, dates, numbers), so your app works exactly as it did. Nothing is changed on the other server.</p>
+          <label className="field" style={{ marginTop: 14 }}>Connection address<input className="input mono" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="mongodb+srv://user:password@cluster0.abcde.mongodb.net/myapp" autoFocus spellCheck={false} autoComplete="off" /></label>
+          <label className="field" style={{ marginTop: 12 }}>Database name <span className="muted">(optional, only if it isn't in the address)</span><input className="input mono" value={dbName} onChange={(e) => setDbName(e.target.value)} placeholder="myapp" spellCheck={false} /></label>
+          <ul className="small secondary" style={{ marginTop: 12 }}>
+            <li>MongoDB Atlas: under <strong>Network Access</strong>, allow this computer's internet address first.</li>
+            <li>Documents already here with the same <span className="mono">_id</span> are left alone, so running it again is safe.</li>
+            <li>The address and password are used once for the copy and are not stored.</li>
+          </ul>
+          <ErrorNote error={error} />
+        </>
+      ) : !job ? <Spinner label="Starting…" /> : (
+        <div>
+          <div className="row"><Status tone={job.status === "failed" ? "critical" : job.status === "succeeded" ? "good" : "neutral"} spinning={job.status === "running"}>{job.status === "failed" ? "Failed" : job.status === "succeeded" ? "Complete" : "Copying"}</Status><strong>{job.title}</strong></div>
+          <ul className="copy-steps">{job.steps.map((s) => <li key={s.key} className={s.status}><span>{s.status === "done" ? "✓" : s.status === "failed" ? "×" : s.status === "running" ? "•" : "○"} {s.label}</span>{s.detail && <span className="small muted">{s.detail}</span>}</li>)}</ul>
+          {job.log.length > 0 && <ul className="small secondary">{job.log.map((l, i) => <li key={i}>{l}</li>)}</ul>}
+          {job.problem && <ProblemCard problem={job.problem} />}
+        </div>
       )}
     </Modal>
   );
@@ -130,16 +194,18 @@ export function DocumentDatabaseDetail({ me }: { me: Me }) {
   const { data, error, loading, reload } = useApi<DocumentPage>(base ? `${base}?${query}` : null);
   const writable = database ? canWrite(me, database.ownerAppIds) : false;
   const exportUrl = base ? `/api/v1${base}/export.json${filter ? `?filter=${encodeURIComponent(filter)}` : ""}` : "#";
-  const { data: textIds, reload: reloadTextIds } = useApi<{ count: number }>(base ? `${base}/text-ids` : null);
+  const { data: typeIssues, reload: reloadTypeIssues } = useApi<TypeIssues>(base ? `${base}/type-issues` : null);
   const [converting, setConverting] = useState(false);
   const [convertNote, setConvertNote] = useState<string | null>(null);
-  const refresh = async () => { await Promise.all([reload(), reloadCollections(), reloadDb(), reloadTextIds()]); };
-  async function convertIds() {
+  const [copying, setCopying] = useState(false);
+  const refresh = async () => { await Promise.all([reload(), reloadCollections(), reloadDb(), reloadTypeIssues()]); };
+  useEffect(() => setConvertNote(null), [selected]);
+  async function fixTypes() {
     if (!base) return;
     setConverting(true);
     try {
-      const r = await post<{ converted: number; skipped: number }>(`${base}/convert-ids`);
-      setConvertNote(`Converted ${r.converted} id${r.converted === 1 ? "" : "s"} to ObjectIds${r.skipped ? ` (${r.skipped} skipped: that ObjectId already exists)` : ""}. Your app can now find these documents by id.`);
+      const r = await post<{ fixed: number; skipped: number; failed: number }>(`${base}/fix-types`);
+      setConvertNote(`Fixed ${r.fixed.toLocaleString()} document${r.fixed === 1 ? "" : "s"}${r.skipped ? ` (${r.skipped} skipped: a document with that ObjectId already exists)` : ""}${r.failed ? ` · ${r.failed} could not be changed` : ""}. Your app can now find them by id and sort and group them by date.`);
       await refresh();
     } catch (e) {
       setConvertNote((e as Error).message);
@@ -180,7 +246,7 @@ export function DocumentDatabaseDetail({ me }: { me: Me }) {
   return (
     <>
       <div className="app-breadcrumb"><Link to="/databases"><ArrowLeft size={15} /> Databases</Link></div>
-      <PageHead title={<span className="row"><span className="database-icon large documents"><Braces size={21} /></span>{database.name}<StatusOf status={database.status} /></span>} sub={<span><span className="engine-label">Documents · MongoDB-compatible</span> <span className="mono">{database.dbName}</span></span>} />
+      <PageHead title={<span className="row"><span className="database-icon large documents"><Braces size={21} /></span>{database.name}<StatusOf status={database.status} /></span>} sub={<span><span className="engine-label">Documents · MongoDB-compatible</span> <span className="mono">{database.dbName}</span></span>} actions={<>{writable && <button className="btn" onClick={() => setCopying(true)}><CloudDownload size={16} /> Copy from MongoDB</button>}<Link className="btn" to={`/documents/${id}/blueprint`}><FileText size={16} /> Blueprint</Link></>} />
       <div className="grid database-summary">
         <div className="card"><span className="stat-label">Database Size</span><strong className="stat-value">{formatBytes(database.sizeBytes)}</strong></div>
         <div className="card"><span className="stat-label">Collections</span><strong className="stat-value">{database.tableCount}</strong></div>
@@ -216,12 +282,12 @@ export function DocumentDatabaseDetail({ me }: { me: Me }) {
             </form>
             {!filter && <div className="filter-chips"><span className="small muted">Examples:</span>{FILTER_EXAMPLES.map((ex) => <button key={ex} className="mono" onClick={() => { setFilterDraft(ex); filterRef.current?.focus(); }}>{ex}</button>)}</div>}
             <ErrorNote error={writeError} />
-            {!!textIds?.count && (
+            {!!typeIssues?.documents && (
               <div className="notice warn small text-id-note">
                 <span>
-                  <strong>{textIds.count} document{textIds.count === 1 ? " has its" : "s have their"} id stored as text.</strong> Apps usually look documents up by ObjectId (for example Mongoose <code>findById</code>), so {textIds.count === 1 ? "it" : "they"} won't be found. This usually comes from importing a file saved from an app or API.
+                  <strong>{typeIssues.documents.toLocaleString()} document{typeIssues.documents === 1 ? " has" : "s have"} {typeParts(typeIssues)} stored as plain text.</strong> Apps expect ObjectIds and dates: text ids aren't found by <code>findById</code>, and text dates break sorting and date grouping (<code>$dateToString</code>, charts, analytics). This usually comes from importing a file saved from an app or API.
                 </span>
-                {writable && <button className="btn small primary" disabled={converting} onClick={() => void convertIds()}>{converting ? <Spinner label="Converting…" /> : "Convert to ObjectIds"}</button>}
+                {writable && <button className="btn small primary" disabled={converting} onClick={() => void fixTypes()}>{converting ? <Spinner label="Fixing…" /> : "Fix types"}</button>}
               </div>
             )}
             {convertNote && <div className="notice saved-note small">{convertNote}</div>}
@@ -254,6 +320,7 @@ export function DocumentDatabaseDetail({ me }: { me: Me }) {
       {database && <div className="db-link-zone"><DatabaseLink kind="documents" databaseId={database.id} canManage={me.permissions.includes("server.settings")} /></div>}
       {database && me.permissions.includes("server.settings") && <div className="danger-zone"><DeleteDatabase database={database} kind="documents" /></div>}
       {editing && <JsonEditor title={editing === "new" ? `Add document to ${selected}` : "Edit document"} saveLabel={editing === "new" ? "Add Document" : "Save Changes"} initial={editing === "new" ? "{\n  \n}" : JSON.stringify(editing, null, 2)} onSave={saveDocument} onClose={() => setEditing(null)} />}
+      {copying && <CopyDialog databaseId={id} onDone={() => void refresh()} onClose={() => setCopying(false)} />}
       {importing && base && <ImportDialog collection={selected!} endpoint={`${base}/import`} onDone={() => void refresh()} onClose={() => setImporting(false)} />}
       {deleting && <Modal title="Delete this document?" onClose={() => setDeleting(null)} footer={<><button className="btn" onClick={() => setDeleting(null)}>Cancel</button><button className="btn danger" style={{ background: "var(--critical)", color: "white" }} onClick={() => void removeDocument()}><Trash2 size={15} /> Delete Document</button></>}><p>This deletes one document from <strong>{selected}</strong>. This cannot be undone, but your backups still contain it.</p><pre className="mono delete-key">{JSON.stringify(deleting, null, 2).slice(0, 1200)}</pre></Modal>}
       {newCollection !== null && <Modal title="New Collection" onClose={() => setNewCollection(null)} footer={<><button className="btn" onClick={() => setNewCollection(null)}>Cancel</button><button className="btn primary" disabled={!newCollection.trim()} onClick={() => void createCollection()}>Create Collection</button></>}><p className="secondary">A collection holds documents of one kind, like <em>customers</em> or <em>orders</em>.</p><label className="field" style={{ marginTop: 14 }}>Collection name<input className="input" value={newCollection} onChange={(e) => setNewCollection(e.target.value)} onKeyDown={(e) => e.key === "Enter" && void createCollection()} autoFocus maxLength={120} placeholder="customers" /></label></Modal>}

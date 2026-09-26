@@ -260,6 +260,7 @@ export function systemRoutes(deps: {
           targetType: z.string().optional(),
           targetId: z.string().optional(),
           limit: z.coerce.number().int().max(1000).optional(),
+          beforeId: z.coerce.number().int().positive().optional(),
         })
         .parse(req.query);
       return { entries: ctx.audit.query(q), integrity: ctx.audit.verify() };

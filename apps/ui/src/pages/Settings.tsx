@@ -6,7 +6,7 @@ import type { FriendlyProblem } from "@nexus/shared/errors";
 import type { Me } from "../App";
 import { PageHead } from "../components/Layout";
 import { Card, ConfirmByName, ErrorNote, Modal, ProblemCard, Spinner, Status } from "../components/ui";
-import { ApiError, del, patch, post, put } from "../lib/api";
+import { ApiError, del, get, patch, post, put } from "../lib/api";
 import { useApi } from "../lib/hooks";
 import { PluginSettings } from "../components/PluginSettings";
 import { PrivateNetwork } from "../components/PrivateNetwork";
@@ -220,6 +220,41 @@ function AppDeveloperCard() {
   </Card>;
 }
 
+const AUDIT_PAGE = 50;
+
+/** The newest events (refreshed live) in a fixed-height scrolling box; older ones load on request. */
+function AuditList({ latest, total }: { latest: AuditEntry[]; total: number }) {
+  const [older, setOlder] = useState<AuditEntry[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [end, setEnd] = useState(false);
+  const [error, setError] = useState<ApiError | null>(null);
+  const entries = useMemo(() => {
+    const seen = new Set(latest.map((e) => e.id));
+    return [...latest, ...older.filter((e) => !seen.has(e.id))];
+  }, [latest, older]);
+  async function loadOlder() {
+    const oldest = entries.at(-1)?.id;
+    if (!oldest) return;
+    setLoading(true);
+    try {
+      const r = await get<AuditState>(`/audit?limit=${AUDIT_PAGE}&beforeId=${oldest}`);
+      setOlder((o) => [...o, ...r.entries]);
+      if (r.entries.length < AUDIT_PAGE) setEnd(true);
+      setError(null);
+    } catch (e) {
+      setError(e as ApiError);
+    } finally {
+      setLoading(false);
+    }
+  }
+  const more = !end && entries.length < total && (entries.at(-1)?.id ?? 0) > 1;
+  return <>
+    <div className="audit-list">{entries.map((entry) => <div className="audit-row" key={entry.id}><span className="audit-number">#{entry.id}</span><span><strong>{entry.action.replaceAll(".", " › ")}</strong><small>{entry.actorName ?? entry.actorType}{entry.targetType ? ` · ${entry.targetType}${entry.targetId ? ` ${entry.targetId}` : ""}` : ""}</small></span><Status tone={entry.outcome === "success" ? "good" : "critical"}>{entry.outcome}</Status><time>{new Date(entry.at).toLocaleString()}</time></div>)}</div>
+    <ErrorNote error={error} />
+    <div className="audit-foot"><span className="small muted">Showing {entries.length.toLocaleString()} of {total.toLocaleString()} events</span>{more && <button className="btn small" disabled={loading} onClick={() => void loadOlder()}>{loading ? <Spinner label="Loading…" /> : "Show older"}</button>}</div>
+  </>;
+}
+
 function DeveloperPanel({ me }: { me: Me }) {
   const { data: hardware } = useApi<{ hardware: HardwareProfile }>("/hardware");
   const { data: audit, error: auditError } = useApi<AuditState>(me.permissions.includes("audit.view") ? "/audit?limit=30" : null, 15_000);
@@ -232,7 +267,7 @@ function DeveloperPanel({ me }: { me: Me }) {
     <Card title="Detected hardware" sub="Read-only information used for automatic configuration.">{hardware ? <div className="hardware-grid"><span><Cpu size={17} /><strong>{hardware.hardware.cpu.model}</strong><small>{hardware.hardware.cpu.cores} cores · {hardware.hardware.cpu.threads} threads</small></span><span><Database size={17} /><strong>{Math.round(hardware.hardware.memory.totalBytes / 1073741824)} GB memory</strong><small>{Math.round(hardware.hardware.memory.freeBytes / 1073741824)} GB currently free</small></span><span><HardDrive size={17} /><strong>{hardware.hardware.disks.length} storage devices</strong><small>{hardware.hardware.disks.map((d) => d.mount).join(", ")}</small></span><span><Laptop size={17} /><strong>{hardware.hardware.os.edition || hardware.hardware.os.name}</strong><small>{hardware.hardware.system.manufacturer} {hardware.hardware.system.model}</small></span></div> : <Spinner label="Reading hardware…" />}</Card>
     <AppDeveloperCard />
     {me.permissions.includes("server.settings") && <Card title="System logs" sub="Technical service output. Secrets are automatically redacted." action={<select className="select log-source-select" value={source} onChange={(e) => setSource(e.target.value)}><option value="gateway">Secure gateway</option><option value="postgres">PostgreSQL</option><option value="ai">Local AI</option></select>}><ErrorNote error={logError} />{!recentLogs.length ? <div className="settings-empty compact"><Activity size={24} /><strong>No recent {source} logs</strong></div> : <div className="system-log">{recentLogs.map((entry, i) => <div className={`system-log-line ${entry.level}`} key={`${entry.t}:${i}`}><time>{new Date(entry.t).toLocaleTimeString()}</time><strong>{entry.level}</strong><pre>{entry.message}</pre></div>)}</div>}</Card>}
-    {me.permissions.includes("audit.view") && <Card title="Audit trail" sub="Append-only record of security and configuration changes." action={audit && <Status tone={audit.integrity.intact ? "good" : "critical"}>{audit.integrity.intact ? "Chain intact" : `Broken at #${audit.integrity.brokenAt}`}</Status>}><ErrorNote error={auditError} />{audit && <div className="audit-list">{audit.entries.map((entry) => <div className="audit-row" key={entry.id}><span className="audit-number">#{entry.id}</span><span><strong>{entry.action.replaceAll(".", " › ")}</strong><small>{entry.actorName ?? entry.actorType}{entry.targetType ? ` · ${entry.targetType}${entry.targetId ? ` ${entry.targetId}` : ""}` : ""}</small></span><Status tone={entry.outcome === "success" ? "good" : "critical"}>{entry.outcome}</Status><time>{new Date(entry.at).toLocaleString()}</time></div>)}</div>}</Card>}
+    {me.permissions.includes("audit.view") && <Card title="Audit trail" sub="Append-only record of security and configuration changes." action={audit && <Status tone={audit.integrity.intact ? "good" : "critical"}>{audit.integrity.intact ? "Chain intact" : `Broken at #${audit.integrity.brokenAt}`}</Status>}><ErrorNote error={auditError} />{audit && <AuditList latest={audit.entries} total={audit.integrity.entries} />}</Card>}
   </>;
 }
 

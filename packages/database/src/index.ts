@@ -6,3 +6,5 @@ export * from "./ferretdb";
 export * from "./documents";
 export * from "./doc-browser";
 export * from "./doc-compat";
+export * from "./schema";
+export * from "./doc-migrate";

@@ -5,8 +5,31 @@ import { once } from "node:events";
 import { BSON, type Document, type MongoClient } from "mongodb";
 import { NexusError } from "@nexus/shared";
 import type { DocumentDatabaseManager } from "./documents";
+import { copyFromMongo, knownIds, repairTypes, restoreTypes, typeReport, type CopyProgress, type CopyResult, type TypeChanges, type TypeReport } from "./doc-migrate";
 
 const { EJSON, ObjectId } = BSON;
+
+export interface DocumentBlueprint {
+  collections: {
+    name: string;
+    documents: number;
+    /** How many documents the field list was worked out from. */
+    sampled: number;
+    fields: { path: string; types: string[]; presence: number; references: string | null }[];
+    indexes: { name: string; keys: string[]; unique: boolean }[];
+  }[];
+  relations: { from: { collection: string; field: string }; to: { collection: string; field: string } }[];
+}
+
+function typeOf(v: unknown): string {
+  if (v === null || v === undefined) return "null";
+  if (v instanceof ObjectId) return "ObjectId";
+  if (v instanceof Date) return "date";
+  if (Array.isArray(v)) return "array";
+  const bsonType = (v as { _bsontype?: string })._bsontype;
+  if (bsonType) return bsonType === "Decimal128" ? "decimal" : bsonType === "Long" || bsonType === "Int32" ? "number" : bsonType;
+  return typeof v === "object" ? "object" : typeof v;
+}
 const OBJECT_ID_TEXT = /^[0-9a-f]{24}$/i;
 
 export interface CollectionSummary {
@@ -97,6 +120,69 @@ export class DocumentBrowser {
 
   private async inDb<T>(databaseId: string, fn: (c: MongoClient, dbName: string) => Promise<T>): Promise<T> {
     return this.docs.withDatabase(databaseId, fn);
+  }
+
+  /**
+   * The blueprint of a document database: each collection's fields worked out from its documents
+   * (types, how often present), its indexes, and links between collections (fields holding ObjectIds
+   * that match another collection's _id).
+   */
+  async blueprint(databaseId: string, sampleSize = 300): Promise<DocumentBlueprint> {
+    return this.inDb(databaseId, async (c, dbName) => {
+      const db = c.db(dbName);
+      const names = (await db.listCollections({ type: "collection" }, { nameOnly: true }).toArray())
+        .map((x) => x.name)
+        .filter((n) => n !== INTERNAL && !n.startsWith("system."))
+        .sort((a, b) => a.localeCompare(b));
+      const collections: DocumentBlueprint["collections"] = [];
+      const idOwner = new Map<string, string>(); // ObjectId hex → collection it identifies
+      const samples = new Map<string, Document[]>();
+      for (const name of names) {
+        const coll = db.collection(name);
+        const docs = await coll.find({}).limit(sampleSize).toArray();
+        samples.set(name, docs);
+        for (const d of docs) if (d._id instanceof ObjectId) idOwner.set(d._id.toHexString(), name);
+        const count = await coll.estimatedDocumentCount().catch(() => docs.length);
+        const indexes = await coll.indexes().catch(() => []);
+        collections.push({ name, documents: count, sampled: docs.length, fields: [], indexes: indexes.map((ix) => ({ name: String(ix.name), keys: Object.keys(ix.key ?? {}), unique: !!ix.unique })) });
+      }
+      const relations: DocumentBlueprint["relations"] = [];
+      for (const col of collections) {
+        const fields = new Map<string, { types: Map<string, number>; present: number; refs: Map<string, number> }>();
+        const docs = samples.get(col.name) ?? [];
+        const visit = (value: unknown, path: string, seen: Set<string>) => {
+          const entry = fields.get(path) ?? { types: new Map(), present: 0, refs: new Map() };
+          fields.set(path, entry);
+          if (!seen.has(path)) {
+            entry.present++;
+            seen.add(path);
+          }
+          const type = typeOf(value);
+          entry.types.set(type, (entry.types.get(type) ?? 0) + 1);
+          if (value instanceof ObjectId && path !== "_id") {
+            const target = idOwner.get(value.toHexString());
+            if (target) entry.refs.set(target, (entry.refs.get(target) ?? 0) + 1);
+          }
+          if (Array.isArray(value)) for (const v of value.slice(0, 20)) if (v instanceof ObjectId) {
+            const target = idOwner.get(v.toHexString());
+            if (target) entry.refs.set(target, (entry.refs.get(target) ?? 0) + 1);
+          }
+          if (type === "object" && path.split(".").length < 4) for (const [k, v] of Object.entries(value as Document)) visit(v, `${path}.${k}`, seen);
+        };
+        for (const d of docs) {
+          const seen = new Set<string>();
+          for (const [k, v] of Object.entries(d)) visit(v, k, seen);
+        }
+        col.fields = [...fields.entries()]
+          .map(([path, e]) => {
+            const ref = [...e.refs.entries()].sort((a, b) => b[1] - a[1])[0];
+            if (ref) relations.push({ from: { collection: col.name, field: path }, to: { collection: ref[0], field: "_id" } });
+            return { path, types: [...e.types.entries()].sort((a, b) => b[1] - a[1]).map(([t]) => t), presence: docs.length ? e.present / docs.length : 0, references: ref ? ref[0] : null };
+          })
+          .sort((a, b) => (a.path === "_id" ? -1 : b.path === "_id" ? 1 : a.path.localeCompare(b.path)));
+      }
+      return { collections, relations };
+    });
   }
 
   async collections(databaseId: string): Promise<CollectionSummary[]> {
@@ -218,7 +304,7 @@ export class DocumentBrowser {
    * Imports documents from a JSON array or JSON Lines (one document per line). Existing documents
    * with the same _id are left alone and reported, so importing twice never duplicates.
    */
-  async importJson(databaseId: string, collection: string, text: string): Promise<{ inserted: number; skipped: number; errors: string[]; convertedIds: number }> {
+  async importJson(databaseId: string, collection: string, text: string): Promise<{ inserted: number; skipped: number; errors: string[]; convertedIds: number; restored: TypeChanges }> {
     assertCollectionName(collection);
     let docs: Document[];
     const trimmed = text.trim();
@@ -238,17 +324,19 @@ export class DocumentBrowser {
       throw NexusError.invalid("Every entry in the file must be a JSON object (a document).");
     }
     docs.forEach((d) => assertSafe(d));
-    // Files saved from an app or API often have ids as plain text ("_id": "6a79…"). Apps look them
-    // up as ObjectIds (Mongoose findById), so a text id that is exactly an ObjectId becomes one.
-    let convertedIds = 0;
-    for (const d of docs) {
-      if (typeof d._id === "string" && OBJECT_ID_TEXT.test(d._id)) {
-        d._id = new ObjectId(d._id);
-        convertedIds++;
-      }
-    }
-    if (!docs.length) return { inserted: 0, skipped: 0, errors: [], convertedIds };
+    if (!docs.length) return { inserted: 0, skipped: 0, errors: [], convertedIds: 0, restored: { ids: 0, references: 0, dates: 0 } };
     return this.inDb(databaseId, async (c, dbName) => {
+      // Files saved from an app or API lose MongoDB's types: ids and dates arrive as plain text.
+      // Apps look documents up by ObjectId and group by real dates, so those types are put back:
+      // text _ids, references to documents that exist (here or in this file), and ISO timestamps.
+      const known = await knownIds(c, dbName);
+      for (const d of docs) {
+        const id = typeof d._id === "string" ? d._id : d._id instanceof ObjectId ? d._id.toHexString() : null;
+        if (id && OBJECT_ID_TEXT.test(id)) known.add(id.toLowerCase());
+      }
+      const restored: TypeChanges = { ids: 0, references: 0, dates: 0 };
+      docs = docs.map((d) => restoreTypes(d, restored, known).doc);
+      const convertedIds = restored.ids;
       const coll = c.db(dbName).collection(collection);
       let inserted = 0;
       let skipped = 0;
@@ -268,7 +356,7 @@ export class DocumentBrowser {
           }
         }
       }
-      return { inserted, skipped, errors, convertedIds };
+      return { inserted, skipped, errors, convertedIds, restored };
     });
   }
 
@@ -313,6 +401,23 @@ export class DocumentBrowser {
       }
       return { converted, skipped };
     });
+  }
+
+  /** Text that should be ids or dates (usually from an import): what "Fix types" would change. */
+  async typeIssues(databaseId: string, collection: string): Promise<TypeReport> {
+    assertCollectionName(collection);
+    return this.inDb(databaseId, (c, dbName) => typeReport(c, dbName, collection));
+  }
+
+  /** Turns text ids, text references and text timestamps back into ObjectIds and dates. */
+  async fixTypes(databaseId: string, collection: string): Promise<{ fixed: number; skipped: number; failed: number }> {
+    assertCollectionName(collection);
+    return this.inDb(databaseId, (c, dbName) => repairTypes(c, dbName, collection));
+  }
+
+  /** Copies another MongoDB (Atlas, a local server…) into this database with every type intact. */
+  async copyFrom(databaseId: string, sourceUrl: string, opts: { sourceDb?: string | null; onProgress?: (p: CopyProgress) => void; onCollection?: (name: string) => void } = {}): Promise<CopyResult> {
+    return this.inDb(databaseId, (client, dbName) => copyFromMongo(sourceUrl, { client, dbName }, opts));
   }
 
   // ---------------------------------------------------------------- backup & restore

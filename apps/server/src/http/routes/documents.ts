@@ -5,6 +5,7 @@ import { authorize, type Permission } from "@nexus/security";
 import { NexusError, type DatabaseSummary } from "@nexus/shared";
 import type { NexusContext } from "../../context";
 import type { RouteModule } from "../server";
+import { redactUrl } from "@nexus/database";
 import { appsUsingDb } from "./data";
 import { requirePermission, requireUser } from "../auth";
 
@@ -215,5 +216,55 @@ export const documentRoutes: RouteModule = (app, ctx) => {
     const result = await browser().convertTextIds(id, collection);
     audit(user, "document_collection.convert_ids", id, { collection, ...result });
     return result;
+  });
+
+  /** Text that should be ids or dates (usually from an import) — what "Fix types" would change. */
+  app.get("/api/v1/documents/:id/collections/:collection/type-issues", async (req) => {
+    const { id, collection } = collectionParams.parse(req.params);
+    requireDocPermission(ctx, req, id, "app.view");
+    return browser().typeIssues(id, collection);
+  });
+
+  app.post("/api/v1/documents/:id/collections/:collection/fix-types", async (req) => {
+    const { id, collection } = collectionParams.parse(req.params);
+    const { user } = requireDocPermission(ctx, req, id, "app.data.write");
+    const result = await browser().fixTypes(id, collection);
+    audit(user, "document_collection.fix_types", id, { collection, ...result });
+    if (result.fixed) ctx.activity.add("success", `Fixed ids and dates in ${result.fixed.toLocaleString()} documents of ${collection}.`);
+    return result;
+  });
+
+  /** Copies another MongoDB (Atlas, a local server…) into this database, as a job with progress. */
+  app.post("/api/v1/documents/:id/copy-from", async (req) => {
+    const { id } = req.params as { id: string };
+    const { user, db } = requireDocPermission(ctx, req, id, "app.data.write");
+    const body = z.object({ url: z.string().min(10).max(2000), database: z.string().max(64).optional() }).parse(req.body);
+    const url = body.url.trim();
+    if (!/^mongodb(\+srv)?:\/\//.test(url)) throw NexusError.invalid("Paste a MongoDB address that starts with mongodb:// or mongodb+srv://.");
+    await ctx.startDocuments();
+    audit(user, "document_database.copy_from", id, { source: redactUrl(url) });
+    const job = ctx.jobs.start("document-copy", `Copying into ${db.name}`, [{ key: "connect", label: "Connecting to the other MongoDB" }], async (j) => {
+      j.step("connect", "running");
+      let current: string | null = null;
+      const result = await browser().copyFrom(id, url, {
+        sourceDb: body.database ?? null,
+        onCollection: (name) => {
+          if (current) j.step(current, "done");
+          else j.step("connect", "done");
+          current = `Copy ${name}`;
+          j.step(current, "running");
+        },
+        onProgress: (p) => j.step(`Copy ${p.collection}`, "running", `${p.copied.toLocaleString()}${p.total ? ` of ${p.total.toLocaleString()}` : ""} documents`),
+      });
+      for (const c of result.collections) {
+        const extra = [c.skipped ? `${c.skipped.toLocaleString()} already here` : "", c.indexes ? `${c.indexes} index${c.indexes === 1 ? "" : "es"}` : ""].filter(Boolean).join(", ");
+        j.step(`Copy ${c.name}`, "done", `${c.documents.toLocaleString()} documents copied${extra ? ` (${extra})` : ""}`);
+        for (const e of c.indexErrors) j.log(`Index not copied in ${c.name}: ${e}`);
+      }
+      const total = result.collections.reduce((n, c) => n + c.documents, 0);
+      ctx.activity.add("success", `Copied ${total.toLocaleString()} documents in ${result.collections.length} collections into ${db.name}.`);
+      return result;
+    });
+    return { jobId: job.id };
   });
 };

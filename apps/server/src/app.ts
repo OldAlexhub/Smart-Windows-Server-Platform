@@ -28,6 +28,7 @@ import { PrivateNetworkService } from "./services/private-network";
 import { privateNetworkRoutes } from "./http/routes/private-network";
 import { DatabaseLinkService } from "./services/database-links";
 import { databaseLinkRoutes } from "./http/routes/database-links";
+import { schemaRoutes } from "./http/routes/schema";
 import { PipelineProposalService } from "./services/pipeline-proposals";
 import { NotificationService } from "./services/notifications";
 import { PipelineService } from "./services/pipelines";
@@ -91,6 +92,7 @@ export async function createNexusServer(ctx: NexusContext, extraRoutes: RouteMod
     notificationRoutes(notifications),
     privateNetworkRoutes(privateNetwork),
     databaseLinkRoutes(databaseLinks),
+    schemaRoutes,
     questionRoutes(new DataQuestionService(ctx, () => ai.questionModel())),
     explainRoutes(new ExplainService(ctx, apps, pipelines, () => ai.questionModel())),
     ...extraRoutes,

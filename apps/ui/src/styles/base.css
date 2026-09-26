@@ -1303,7 +1303,8 @@ table.sheet tbody tr:hover td { background: var(--accent-soft); }
 .system-log-line.error strong { color: var(--critical-text); }
 .system-log-line.warning strong { color: var(--warning-text); }
 .system-log-line pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
-.audit-list { display: flex; flex-direction: column; }
+.audit-list { display: flex; flex-direction: column; max-height: 460px; overflow-y: auto; overscroll-behavior: contain; padding-right: 6px; }
+.audit-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 10px; border-top: 1px solid var(--border); margin-top: 4px; }
 .audit-row { display: grid; grid-template-columns: 48px minmax(170px, 1fr) auto 165px; align-items: center; gap: 10px; padding: 10px 2px; border-top: 1px solid var(--border); }
 .audit-row:first-child { border-top: 0; }
 .audit-number, .audit-row time { color: var(--text-muted); font-size: 12px; }

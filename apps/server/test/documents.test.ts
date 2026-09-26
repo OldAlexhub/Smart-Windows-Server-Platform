@@ -8,6 +8,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { NexusContext } from "../src/context";
 import { appRoutes } from "../src/http/routes/apps";
 import { authRoutes } from "../src/http/routes/auth";
+import { schemaRoutes } from "../src/http/routes/schema";
 import { dataRoutes } from "../src/http/routes/data";
 import { documentRoutes } from "../src/http/routes/documents";
 import { repairRoutes } from "../src/http/routes/repairs";
@@ -71,7 +72,7 @@ beforeAll(async () => {
   const gateway = new GatewayService(ctx);
   apps = new AppManager(ctx, gateway);
   const services = { apps, gateway } as unknown as Parameters<typeof repairRoutes>[0];
-  app = await buildServer(ctx, [authRoutes, appRoutes(apps), repairRoutes(services), dataRoutes, documentRoutes]);
+  app = await buildServer(ctx, [authRoutes, appRoutes(apps), repairRoutes(services), dataRoutes, documentRoutes, schemaRoutes]);
   call = await ownerClient(app, ctx);
 
   const dir = join(home, "src", "Shop");
@@ -194,10 +195,10 @@ describe("Document database browser, import/export, backup and restore", () => {
     expect(exported.body).toEqual([expect.objectContaining({ name: "Grace", _id: { $oid: expect.any(String) } })]);
 
     const again = await call("POST", `${base()}/collections/customers/import`, { content: JSON.stringify(exported.body) });
-    expect(again.body).toEqual({ inserted: 0, skipped: 1, errors: [], convertedIds: 0 });
+    expect(again.body).toEqual({ inserted: 0, skipped: 1, errors: [], convertedIds: 0, restored: { ids: 0, references: 0, dates: 0 } });
     const lines = ['{"name":"Linus","orders":1}', '{"name":"Margaret","orders":7}', ""].join("\n");
     const fresh = await call("POST", `${base()}/collections/suppliers/import`, { content: lines, create: true });
-    expect(fresh.body).toEqual({ inserted: 2, skipped: 0, errors: [], convertedIds: 0 });
+    expect(fresh.body).toEqual({ inserted: 2, skipped: 0, errors: [], convertedIds: 0, restored: { ids: 0, references: 0, dates: 0 } });
     expect((await call("POST", `${base()}/collections/suppliers/import`, { content: "not json" })).status).toBe(400);
   });
 
@@ -221,6 +222,118 @@ describe("Document database browser, import/export, backup and restore", () => {
     // Text ids that aren't ObjectIds are left exactly as they are.
     const kept = await ctx.documents!.withDatabase(apps.require("shop").documentDatabaseId!, (c) => c.db("shop").collection("projects").findOne({ _id: "not-an-object-id" as never }));
     expect(kept?.title).toBe("Keep");
+  });
+
+  it("migration: imports restore dates and links, Fix types repairs old imports, and date grouping then works", async () => {
+    const docId = apps.require("shop").documentDatabaseId!;
+    const uid = "6a79217f0d6a7ce0393b5c01";
+    const stranger = "6a79217f0d6a7ce0393b5cff"; // looks like an id but points at nothing
+    const users = await call("POST", `${base()}/collections/members/import`, { content: JSON.stringify([{ _id: uid, name: "Ada", createdAt: "2025-02-16T07:52:02.959Z", birthday: "1990-05-01" }]), create: true });
+    expect(users.body).toMatchObject({ inserted: 1, restored: { ids: 1, references: 0, dates: 1 } });
+    const visits = await call("POST", `${base()}/collections/visits/import`, {
+      content: JSON.stringify([
+        { userId: uid, sessionId: "s-1", eventType: "page_view", timestamp: "2025-02-16T07:52:02.959Z", trackingId: stranger },
+        { userId: uid, sessionId: "s-1", eventType: "page_view", timestamp: { $date: "2025-02-16T09:00:00Z" } },
+      ]),
+      create: true,
+    });
+    expect(visits.body).toMatchObject({ inserted: 2, restored: { ids: 0, references: 2, dates: 1 } });
+    const member = await ctx.documents!.withDatabase(docId, (c) => c.db("shop").collection("members").findOne({ _id: new ObjectId(uid) }));
+    expect(member?.createdAt).toBeInstanceOf(Date);
+    expect(member?.birthday).toBe("1990-05-01"); // a plain date without a time stays text
+    const visit = await ctx.documents!.withDatabase(docId, (c) => c.db("shop").collection("visits").findOne({ sessionId: "s-1", trackingId: stranger }));
+    expect(visit?.userId).toBeInstanceOf(ObjectId);
+    expect(visit?.timestamp).toBeInstanceOf(Date);
+    expect(visit?.trackingId).toBe(stranger); // not a link to anything: left as text
+
+    // Data imported earlier, before this existed: text dates and text links.
+    await ctx.documents!.withDatabase(docId, (c) => c.db("shop").collection("visits").insertOne({ userId: uid, sessionId: "s-2", eventType: "page_view", timestamp: "2025-02-17T10:00:00Z" }));
+    const issues = await call("GET", `${base()}/collections/visits/type-issues`);
+    expect(issues.body).toMatchObject({ documents: 1, ids: 0, references: 1, dates: 1, scanned: 3 });
+    expect((await call("POST", `${base()}/collections/visits/fix-types`)).body).toEqual({ fixed: 1, skipped: 0, failed: 0 });
+    expect((await call("GET", `${base()}/collections/visits/type-issues`)).body).toMatchObject({ documents: 0 });
+
+    // The website-analytics pipeline that failed on text dates now works through the app's own connection.
+    const client = new MongoClient(ctx.documents!.connectionInfo(docId, "shop").url, { serverSelectionTimeoutMS: 5000 });
+    try {
+      const days = await client
+        .db("shop")
+        .collection("visits")
+        .aggregate([
+          { $match: { eventType: "page_view" } },
+          { $group: { _id: { date: { $dateToString: { format: "%Y-%m-%d", date: "$timestamp" } }, visitorId: "$sessionId" }, pageViews: { $sum: 1 } } },
+          { $group: { _id: "$_id.date", uniqueVisitors: { $sum: 1 }, pageViews: { $sum: "$pageViews" } } },
+          { $sort: { _id: 1 } },
+        ])
+        .toArray();
+      expect(days).toEqual([
+        { _id: "2025-02-16", uniqueVisitors: 1, pageViews: 2 },
+        { _id: "2025-02-17", uniqueVisitors: 1, pageViews: 1 },
+      ]);
+    } finally {
+      await client.close();
+    }
+  }, 60_000);
+
+  it("migration: copies a whole MongoDB database with its types and indexes, and can run again safely", async () => {
+    const sourceId = apps.require("shop").documentDatabaseId!;
+    await ctx.documents!.withDatabase(sourceId, (c) => c.db("shop").collection("visits").createIndex({ timestamp: 1 }, { name: "by_time" }));
+    const source = ctx.documents!.connectionInfo(sourceId, "shop").url;
+    const created = await call("POST", "/api/v1/documents", { name: "Moved Shop" });
+    expect(created.status).toBe(200);
+    const target = created.body.id as string;
+
+    const bad = await call("POST", `/api/v1/documents/${target}/copy-from`, { url: "https://example.com/not-mongo" });
+    expect(bad.status).toBe(400);
+
+    const started = await call("POST", `/api/v1/documents/${target}/copy-from`, { url: source });
+    const job = await waitJob(started.body.jobId);
+    expect(job.status).toBe("succeeded");
+    expect(job.steps.map((s: { label: string }) => s.label)).toEqual(expect.arrayContaining(["Connecting to the other MongoDB", "Copy visits", "Copy members"]));
+    const copied = await ctx.documents!.withDatabase(target, async (c, dbName) => {
+      const coll = c.db(dbName).collection("visits");
+      return { count: await coll.countDocuments(), one: await coll.findOne({ sessionId: "s-2" }), indexes: (await coll.indexes()).map((i) => i.name) };
+    });
+    expect(copied.count).toBe(3);
+    expect(copied.one?.timestamp).toBeInstanceOf(Date);
+    expect(copied.one?.userId).toBeInstanceOf(ObjectId);
+    expect(copied.indexes).toContain("by_time");
+
+    // Again: nothing is duplicated.
+    const again = await waitJob((await call("POST", `/api/v1/documents/${target}/copy-from`, { url: source })).body.jobId);
+    expect(again.status).toBe("succeeded");
+    expect(again.steps.find((s: { label: string }) => s.label === "Copy visits").detail).toMatch(/0 documents copied \(3 already here/);
+    // The password never lands in the audit trail.
+    expect(JSON.stringify(ctx.audit.query({}))).not.toContain(ctx.documents!.connectionInfo(sourceId, "shop").password);
+
+    await call("DELETE", `/api/v1/documents/${target}`, { confirmation: created.body.name });
+    await ctx.documents!.withDatabase(sourceId, async (c) => {
+      await c.db("shop").collection("visits").drop();
+      await c.db("shop").collection("members").drop();
+    });
+  }, 120_000);
+
+  it("blueprint: fields worked out from the documents, and links found between collections", async () => {
+    const docId = apps.require("shop").documentDatabaseId!;
+    await ctx.documents!.withDatabase(docId, async (c) => {
+      const grace = await c.db("shop").collection("customers").findOne({ name: "Grace" });
+      await c.db("shop").collection("posts").insertMany([
+        { title: "Hello", author: grace!._id, tags: ["a"], meta: { views: 3 } },
+        { title: "Again", author: grace!._id, publishedAt: new Date() },
+      ]);
+    });
+    const bp = await call("GET", `/api/v1/documents/${docId}/blueprint`);
+    expect(bp.status).toBe(200);
+    expect(bp.body.database).toMatchObject({ name: expect.any(String), dbName: "shop" });
+    expect(bp.body.schema.relations).toContainEqual({ from: { collection: "posts", field: "author" }, to: { collection: "customers", field: "_id" } });
+    const posts = bp.body.schema.collections.find((x: { name: string }) => x.name === "posts");
+    const field = (p: string) => posts.fields.find((f: { path: string }) => f.path === p);
+    expect(field("_id").types).toEqual(["ObjectId"]);
+    expect(field("author")).toMatchObject({ types: ["ObjectId"], presence: 1, references: "customers" });
+    expect(field("publishedAt")).toMatchObject({ types: ["date"], presence: 0.5 });
+    expect(field("meta.views")).toMatchObject({ types: ["number"] });
+    expect(bp.body.connections).toEqual([{ appId: "shop", appName: expect.any(String), settings: expect.arrayContaining([expect.stringMatching(/MONGO/)]) }]);
+    await ctx.documents!.withDatabase(docId, (c) => c.db("shop").collection("posts").drop());
   });
 
   it("backs up the document database and restores it exactly (types and indexes included)", async () => {

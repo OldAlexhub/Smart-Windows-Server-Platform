@@ -145,6 +145,19 @@ Nexus's document databases use **FerretDB**, an open-source MongoDB-compatible e
 - It never emulates write stages (`$out`, `$merge`) and returns FerretDB's original error for those.
 - Very large aggregations are slower when emulated, because Nexus has to read the documents first. A `$match` at the start of the pipeline keeps this fast.
 
+### Moving a MongoDB database into Nexus without breaking it
+MongoDB stores special kinds of values: **ObjectIds** (ids like `6a79…`) and **dates**. A normal JSON file can't hold them, so when data goes through a file they often turn into plain text. Your app then breaks in quiet ways: `findById` finds nothing ("project not found"), and anything that groups or sorts by date fails (for example `$dateToString` in analytics: *"cannot convert … to date"*). Nexus handles this three ways:
+
+1. **Best: copy straight from the old database.** Open the document database → **Copy from MongoDB** → paste the old connection address (for example your Atlas `mongodb+srv://…` link) → **Start Copy**. Every collection, document and index comes across with its exact types. Nothing is changed on the old server. Running it again only brings new documents, so you can copy once to test and again on the day you switch over. For Atlas, first allow this computer's internet address under **Network Access**.
+2. **Importing a file:** Nexus puts the types back automatically. Text `_id`s become ObjectIds. Text timestamps like `2025-02-16T07:52:02.959Z` become dates. Fields like `userId` or `projectIds` become ObjectIds when they point to a document that exists. Plain dates without a time (`1990-05-01`) and ids that point to nothing stay as text. Import the collections that others point to (like `users`) first.
+3. **Data that is already in:** when a collection has ids or dates stored as text, a yellow notice appears above its documents. Press **Fix types**. It takes seconds, even for tens of thousands of documents.
+
+**When you move an app, the checklist is:**
+1. Create the app in Nexus.
+2. Use **Copy from MongoDB** (or import the files).
+3. Open each collection and make sure no yellow notice is left.
+4. Test the pages that list, open and chart things.
+
 ### Common questions
 - **"My app connected to an empty database!"** Nexus created a new one, but your real data is elsewhere (projectOne's is in MongoDB Atlas). Either put your address in the app's Settings as above, or bring the data into Nexus (**Databases → Import data**, or restore a backup).
 - **"Can I open the database with pgAdmin / DBeaver / Compass on this computer?"** Yes. Get the details from **Settings → Advanced › Developer → Application internals →** the app → **Database connection**. It works only from this computer, because the database never listens on the network.
@@ -227,6 +240,21 @@ For managing Nexus and using private apps while away, without putting them on th
 **Ask about it** (needs Nexus AI, Recipe 9):
 3. On the database page → **Ask about this data** → *"What's the average price per area?"*. You get a chart and a table.
 4. Prefer SQL? Switch to **SQL** and type a `SELECT`. It's read-only, so it's safe.
+
+---
+
+## Recipe 7½ — Design tables and print the blueprint
+
+**New table without writing SQL:**
+1. **Databases →** your database → **New Table** (or the **+** next to "Tables").
+2. Start from a template (Customers, Products, Orders, Employees) or Blank. Every row is one column: name, type, Required / Unique / Key, default, **Links to**.
+3. Build linked tables in order: create **customers** first, then **orders** with `customer_id` → **Links to** `customers → id`, **When deleted:** *Block deleting it* (safe) or *Delete these rows too*.
+4. **Ready to create** at the bottom → **Create Table**. Emails and web addresses are checked automatically, links get an index automatically, and the table belongs to the database, so every app connected to it can use it straight away.
+
+**Blueprint (SQL or MongoDB-style):** **Databases →** the database → **Blueprint** → **Print / Save as PDF**.
+- **How it connects:** which apps use it and through which settings (`DATABASE_URL`, `MONGO_URL`…), its address, and any link shared with another server.
+- **Diagram:** every table or collection, with arrows for the links (foreign keys, or ObjectId references Nexus finds in the documents).
+- **Details:** every column (type, required, key, default, link) or field (types, how often it's present), plus indexes.
 
 ---
 
