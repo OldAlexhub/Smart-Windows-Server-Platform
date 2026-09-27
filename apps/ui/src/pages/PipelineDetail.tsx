@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router";
 import type { DatabaseSummary } from "@nexus/shared/contracts";
 import type { Me } from "../App";
+import type { FormContext } from "../components/BlockForm";
 import { PipelineDesigner, type DesignerIssue } from "../components/PipelineDesigner";
 import { PageHead } from "../components/Layout";
 import { ConfirmByName, ErrorNote, Modal, Spinner, Status } from "../components/ui";
@@ -380,7 +381,10 @@ export function PipelineDetail({ me }: { me: Me }) {
   }
 
   const stepStatus = useMemo(() => Object.fromEntries((latest?.[0]?.run.steps ?? []).map((s) => [s.stepId, s.status])), [latest]);
-  const ctx = { databases: (dbs ?? []).filter((d) => d.engine === "postgresql").map((d) => d.name), secrets: (secretList ?? []).map((s) => s.name) };
+  const ctx: FormContext = {
+    catalog: (dbs ?? []).map((d) => ({ id: d.id, name: d.name, engine: d.engine })),
+    secrets: (secretList ?? []).map((s) => s.name),
+  };
 
   if (error && !pipeline) return <ErrorNote error={error} />;
   if (!draft || !blocks || (!isNew && !pipeline)) return <div className="center-panel"><Spinner label="Loading pipeline…" /></div>;

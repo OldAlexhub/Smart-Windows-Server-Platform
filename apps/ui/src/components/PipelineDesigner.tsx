@@ -440,7 +440,16 @@ export function PipelineDesigner({
               <ObjectFields
                 schema={flattenSchema(currentSpec.schema)}
                 value={current.with}
-                ctx={ctx}
+                ctx={{
+                  ...ctx,
+                  connectionKind: current.uses === "mongodb.read" ? "mongodb" : "postgresql",
+                  connectionDatabase: (current.with.connection as { database?: string } | undefined)?.database || undefined,
+                  // Reading works for both families, so picking the other kind of database swaps the source block.
+                  onSwitchEngine:
+                    !readOnly && (current.uses === "postgres.read" || current.uses === "mongodb.read")
+                      ? (engine, database) => updateStep(current.id, { uses: engine === "mongodb" ? "mongodb.read" : "postgres.read", with: { connection: { database } } })
+                      : undefined,
+                }}
                 onChange={(w) => updateStep(current.id, { with: w })}
               />
             )}

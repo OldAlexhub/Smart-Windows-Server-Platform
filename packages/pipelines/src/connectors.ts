@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { createWriteStream, existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
 import { once } from "node:events";
 import { dirname, extname, isAbsolute, join } from "node:path";
+import { BSON, MongoClient, type Document } from "mongodb";
 import { attachInput, ident, sqlPath, sqlString, writeDataset, type Dataset, type Sandbox } from "./duck";
 import { StepError } from "./errors";
 import type { EngineServices, StepContext, StepExecutor, StepResult } from "./executor";
@@ -15,6 +16,8 @@ export interface ConnectorServices extends EngineServices {
   extension?(name: string): string | undefined;
   /** A connection URL for a Nexus database (by name) or an external one (URL kept in a secret). */
   database?(ref: { database: string } | { secret: string }, access: "read" | "write"): Promise<{ url: string; label: string }>;
+  /** A MongoDB connection URL for a Nexus document database or an external server. */
+  documentDatabase?(ref: { database: string } | { secret: string }): Promise<{ url: string; label: string; database?: string }>;
   /** The Nexus Warehouse (created on first use). */
   warehouse?(access: "read" | "write"): Promise<{ url: string; label: string }>;
   /** Absolute path of a file in an application's Nexus Storage. */
@@ -193,6 +196,96 @@ const sqliteRead: StepExecutor = {
     }
   },
 };
+
+// ---------------------------------------------------------------- MongoDB
+
+type MongoTarget = { url: string; label: string; database?: string };
+
+/**
+ * Warehouse columns must be scalar. BSON scalar wrappers become useful strings/numbers while
+ * nested documents and arrays remain lossless Extended JSON strings.
+ */
+export function mongoDocumentToRow(document: Document): Record<string, string | number | boolean | null> {
+  const serialized = BSON.EJSON.serialize(document, { relaxed: true }) as Record<string, unknown>;
+  const scalar = (value: unknown): string | number | boolean | null => {
+    if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+    if (typeof value === "number") return Number.isFinite(value) ? value : String(value);
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      const entries = Object.entries(value as Record<string, unknown>);
+      if (entries.length === 1) {
+        const [kind, inner] = entries[0]!;
+        if (["$oid", "$numberDecimal", "$numberLong"].includes(kind) && typeof inner === "string") return inner;
+        if (["$numberInt", "$numberDouble"].includes(kind) && typeof inner === "string" && Number.isFinite(Number(inner))) return Number(inner);
+        if (kind === "$date" && (typeof inner === "string" || typeof inner === "number")) return String(inner);
+      }
+    }
+    return JSON.stringify(value) ?? null;
+  };
+  return Object.fromEntries(Object.entries(serialized).map(([key, value]) => [key, scalar(value)]));
+}
+
+function mongoFailure(label: string, e: unknown): StepError {
+  const msg = (e as Error).message ?? String(e);
+  if (/authentication failed|auth failed|bad auth|not authorized|unauthorized/i.test(msg)) return new StepError(`${label} refused the connection details. Check the saved MongoDB credentials.`, { technical: msg });
+  if (/ECONNREFUSED|ENOTFOUND|server selection|timed out|timeout|connection (?:closed|reset)|topology is closed/i.test(msg)) return new StepError(`${label} isn't reachable right now.`, { transient: true, technical: msg });
+  if (/Invalid connection string|URI must include|scheme must be/i.test(msg)) return new StepError(`The saved MongoDB address isn't valid.`, { technical: msg });
+  return new StepError(`${label}: ${msg.split("\n")[0]}`, { technical: msg, cause: e });
+}
+
+async function readMongo(ctx: StepContext, target: MongoTarget): Promise<StepResult> {
+  const c = ctx.config as {
+    databaseName?: string;
+    collection: string;
+    filter: Record<string, unknown>;
+    projection?: Record<string, 0 | 1>;
+    batchSize: number;
+  };
+  const file = join(ctx.workDir, "mongodb-records.jsonl");
+  const client = new MongoClient(target.url, { appName: "nexus-pipelines", serverSelectionTimeoutMS: 10_000, connectTimeoutMS: 5000 });
+  const abort = () => void client.close().catch(() => undefined);
+  ctx.signal.addEventListener("abort", abort, { once: true });
+  let count = 0;
+  try {
+    await client.connect();
+    const databaseName = target.database ?? c.databaseName;
+    const database = client.db(databaseName);
+    const filter = BSON.EJSON.deserialize(c.filter) as Document;
+    const out = createWriteStream(file);
+    try {
+      const cursor = database.collection(c.collection).find(filter, {
+        ...(c.projection ? { projection: c.projection } : {}),
+        batchSize: c.batchSize,
+        signal: ctx.signal,
+      });
+      for await (const document of cursor) {
+        if (ctx.testRows !== null && count >= ctx.testRows) break;
+        if (!out.write(`${JSON.stringify(mongoDocumentToRow(document))}\n`)) await once(out, "drain");
+        count++;
+      }
+    } finally {
+      out.end();
+      await once(out, "finish");
+    }
+    ctx.log("info", `Read ${count.toLocaleString("en-US")} documents from ${c.collection} in ${target.label}.`);
+  } catch (e) {
+    rmSync(file, { force: true });
+    throw e instanceof StepError ? e : mongoFailure(target.label, e);
+  } finally {
+    ctx.signal.removeEventListener("abort", abort);
+    await client.close().catch(() => undefined);
+  }
+
+  const sb = await ctx.sandbox();
+  try {
+    const output = count
+      ? await writeDataset(sb, `SELECT * FROM read_json_auto(${sqlPath(file)}, format = 'newline_delimited')${limit(ctx)}`, ctx.outputPath)
+      : await writeDataset(sb, "SELECT NULL::VARCHAR AS no_records WHERE false", ctx.outputPath);
+    return { output, warnings: count ? [] : [`The MongoDB collection ${c.collection} returned no documents.`], metrics: { rowsOut: output.rows, bytesOut: output.bytes } };
+  } finally {
+    sb.close();
+    rmSync(file, { force: true });
+  }
+}
 
 // ---------------------------------------------------------------- PostgreSQL & Warehouse
 
@@ -428,9 +521,11 @@ async function writeDb(ctx: StepContext, target: DbTarget): Promise<StepResult> 
 }
 
 const dbTarget = (ctx: StepContext, access: "read" | "write") => need(svc(ctx).database, "Database access")(ctx.config.connection as { database: string } | { secret: string }, access);
+const mongoTarget = (ctx: StepContext) => need(svc(ctx).documentDatabase, "MongoDB access")(ctx.config.connection as { database: string } | { secret: string });
 const whTarget = (ctx: StepContext, access: "read" | "write") => need(svc(ctx).warehouse, "The Nexus Warehouse")(access);
 
 const postgresRead: StepExecutor = { kind: "postgres.read", run: async (ctx) => readDb(ctx, await dbTarget(ctx, "read")) };
+const mongodbRead: StepExecutor = { kind: "mongodb.read", run: async (ctx) => readMongo(ctx, await mongoTarget(ctx)) };
 const postgresWrite: StepExecutor = { kind: "postgres.write", run: async (ctx) => writeDb(ctx, await dbTarget(ctx, "write")) };
 const warehouseRead: StepExecutor = { kind: "warehouse.read", run: async (ctx) => readDb(ctx, await whTarget(ctx, "read")) };
 const warehouseWrite: StepExecutor = { kind: "warehouse.write", run: async (ctx) => writeDb(ctx, await whTarget(ctx, "write")) };
@@ -609,4 +704,4 @@ const apiWrite: StepExecutor = {
   },
 };
 
-export const BUILTIN_CONNECTORS: StepExecutor[] = [csvRead, jsonRead, parquetRead, excelRead, storageRead, sqliteRead, postgresRead, warehouseRead, restRead, postgresTransform, warehouseTransform, postgresWrite, warehouseWrite, fileWrite, storageWrite, apiWrite];
+export const BUILTIN_CONNECTORS: StepExecutor[] = [csvRead, jsonRead, parquetRead, excelRead, storageRead, sqliteRead, postgresRead, mongodbRead, warehouseRead, restRead, postgresTransform, warehouseTransform, postgresWrite, warehouseWrite, fileWrite, storageWrite, apiWrite];

@@ -20,7 +20,7 @@ export const INTENTS: { id: TemplateIntent; label: string; description: string }
   { id: "export", label: "Export data", description: "Save data as files (Parquet, CSV, Excel)." },
 ];
 
-export type FieldKind = "database" | "table" | "file" | "folder" | "url" | "text" | "secret" | "script" | "time" | "column" | "choice";
+export type FieldKind = "database" | "document_database" | "table" | "collection" | "file" | "folder" | "url" | "text" | "secret" | "script" | "time" | "column" | "choice";
 
 export interface TemplateField {
   name: string;
@@ -49,6 +49,8 @@ export interface PipelineTemplate {
 
 const f = {
   database: (label = "Source database"): TemplateField => ({ name: "database", label, kind: "database", required: true }),
+  documentDatabase: (label = "Source MongoDB database"): TemplateField => ({ name: "database", label, kind: "document_database", required: true }),
+  collection: (): TemplateField => ({ name: "collection", label: "Collection", kind: "collection", required: true, help: "The MongoDB collection to copy." }),
   table: (name = "table", label = "Table", help?: string): TemplateField => ({ name, label, kind: "table", required: true, ...(help ? { help } : {}) }),
   target: (label = "Save into table", def?: string): TemplateField => ({ name: "target", label, kind: "text", required: true, ...(def ? { default: def } : {}), help: "A table name like trips or analytics.trips. Nexus creates it if it doesn't exist." }),
   mode: (): TemplateField => ({
@@ -88,6 +90,45 @@ export const TEMPLATES: PipelineTemplate[] = [
       ...daily(v),
       steps: [
         { id: "extract", uses: "postgres.read", with: { connection: { database: v.database }, table: v.table } },
+        { id: "load", uses: "warehouse.write", with: { table: v.target, mode: mode(v) } },
+      ],
+    }),
+  },
+  {
+    id: "mongodb-to-warehouse",
+    name: "MongoDB → Warehouse",
+    description: "Copy a collection from one of your MongoDB-compatible document databases into the Warehouse.",
+    intents: ["warehouse", "move"],
+    flow: ["MongoDB", "Warehouse"],
+    fields: [f.documentDatabase(), f.collection(), f.target("Warehouse table"), f.mode(), f.time()],
+    build: (v) => ({
+      name: title(v, `${v.database} ${v.collection} → Warehouse`),
+      ...daily(v),
+      steps: [
+        { id: "extract", uses: "mongodb.read", with: { connection: { database: v.database }, collection: v.collection } },
+        { id: "load", uses: "warehouse.write", with: { table: v.target, mode: mode(v) } },
+      ],
+    }),
+  },
+  {
+    id: "external-mongodb-to-warehouse",
+    name: "External MongoDB → Warehouse",
+    description: "Copy a collection from another MongoDB server or Atlas into the Warehouse using a saved connection secret.",
+    intents: ["warehouse", "move", "import"],
+    flow: ["External MongoDB", "Warehouse"],
+    fields: [
+      { name: "mongoSecret", label: "MongoDB connection secret", kind: "secret", required: true, help: "Save the full mongodb:// or mongodb+srv:// address under Pipelines › Secrets first." },
+      { name: "databaseName", label: "MongoDB database name", kind: "text", required: true },
+      f.collection(),
+      f.target("Warehouse table"),
+      f.mode(),
+      f.time(),
+    ],
+    build: (v) => ({
+      name: title(v, `${v.databaseName} ${v.collection} → Warehouse`),
+      ...daily(v),
+      steps: [
+        { id: "extract", uses: "mongodb.read", with: { connection: { secret: v.mongoSecret }, databaseName: v.databaseName, collection: v.collection } },
         { id: "load", uses: "warehouse.write", with: { table: v.target, mode: mode(v) } },
       ],
     }),

@@ -153,7 +153,7 @@ export interface Preview {
 export interface TemplateField {
   name: string;
   label: string;
-  kind: "database" | "table" | "file" | "folder" | "url" | "text" | "secret" | "script" | "time" | "column" | "choice";
+  kind: "database" | "document_database" | "table" | "collection" | "file" | "folder" | "url" | "text" | "secret" | "script" | "time" | "column" | "choice";
   required: boolean;
   default?: string;
   help?: string;

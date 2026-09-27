@@ -142,10 +142,24 @@ steps:
 
   it("describes every block the designer can offer", () => {
     const kinds = BLOCKS.map((b) => b.kind);
-    for (const k of ["postgres.read", "csv.read", "excel.read", "json.read", "parquet.read", "rest.read", "python", "r", "sql", "filter", "join", "aggregate", "validate", "transform", "postgres.transform", "warehouse.transform", "warehouse.write", "file.write", "api.write", "notify"]) {
+    for (const k of ["postgres.read", "mongodb.read", "csv.read", "excel.read", "json.read", "parquet.read", "rest.read", "python", "r", "sql", "filter", "join", "aggregate", "validate", "transform", "postgres.transform", "warehouse.transform", "warehouse.write", "file.write", "api.write", "notify"]) {
       expect(kinds).toContain(k);
     }
     expect(new Set(kinds).size).toBe(kinds.length);
+  });
+
+  it("validates MongoDB collection sources", () => {
+    const p = parsePipelineText(`
+name: MongoDB to warehouse
+steps:
+  - id: visits
+    uses: mongodb.read
+    with: { connection: { database: CustomerDocs }, collection: visits, filter: { status: active }, batchSize: 500 }
+  - id: load
+    uses: warehouse.write
+    with: { table: analytics.visits }
+`);
+    expect(p.steps[0]).toMatchObject({ uses: "mongodb.read", with: { connection: { database: "CustomerDocs" }, collection: "visits", filter: { status: "active" }, batchSize: 500 } });
   });
 
   it("validates incremental SQL sources and in-database transforms", () => {

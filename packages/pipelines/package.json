@@ -12,6 +12,7 @@
     "@nexus/runtime": "0.1.0",
     "@nexus/shared": "0.1.0",
     "@nexus/state": "0.1.0",
+    "mongodb": "^7.6.0",
     "yaml": "^2.9.1",
     "zod": "^4.6.5"
   }

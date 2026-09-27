@@ -238,6 +238,21 @@ export class PipelineService {
         if (!db) throw new StepError(`There is no Nexus database called ${ref.database}.`);
         return { url: (await dbs.grantAppAccess(db.id, PIPELINES_APP)).url, label: db.name };
       },
+      documentDatabase: async (ref) => {
+        if ("secret" in ref) {
+          const url = this.ctx.vault.get(`${SECRET_PREFIX}${ref.secret}`);
+          if (!url) throw new StepError(`The secret "${ref.secret}" isn't set up. Add it under Pipelines › Secrets.`);
+          return { url, label: "the external MongoDB server" };
+        }
+        const docs = this.ctx.documents;
+        if (!docs) throw new StepError("Document databases aren't available on this server.", { transient: true });
+        const wanted = ref.database.trim().toLowerCase();
+        const db = docs.list().find((d) => d.name.toLowerCase() === wanted || d.dbName.toLowerCase() === wanted);
+        if (!db) throw new StepError(`There is no Nexus document database called ${ref.database}.`);
+        await docs.ensureRunning(db.id);
+        const info = await docs.grantAppAccess(db.id, PIPELINES_APP);
+        return { url: info.url, label: db.name, database: db.dbName };
+      },
       warehouse: async () => {
         const dbs = this.ctx.databases;
         if (!dbs) throw new StepError("The database server isn't running.", { transient: true });

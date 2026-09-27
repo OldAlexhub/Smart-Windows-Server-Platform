@@ -1,12 +1,48 @@
 import { Plus, Trash2 } from "lucide-react";
-import { useState } from "react";
+import { useId, useState } from "react";
+import { useApi } from "../lib/hooks";
 import type { JsonSchema } from "../lib/pipelines";
 
+export type DatabaseEngine = "postgresql" | "mongodb";
+
+export interface NexusDatabaseRef {
+  id: string;
+  name: string;
+  engine: DatabaseEngine;
+}
+
 export interface FormContext {
-  /** Nexus PostgreSQL databases by name. */
-  databases: string[];
+  /** Every Nexus database the user can see: PostgreSQL and MongoDB-compatible. */
+  catalog: NexusDatabaseRef[];
+  /** The database family used by this block's connection field. */
+  connectionKind?: DatabaseEngine;
+  /** The Nexus database this block's connection points at (drives table/collection suggestions). */
+  connectionDatabase?: string;
+  /** Set when the block has a twin for the other family: picking such a database switches the block. */
+  onSwitchEngine?: (engine: DatabaseEngine, database: string) => void;
   /** Saved pipeline secret names. */
   secrets: string[];
+}
+
+export const ENGINE_LABEL: Record<DatabaseEngine, string> = { postgresql: "PostgreSQL", mongodb: "MongoDB" };
+
+/** Table (PostgreSQL) or collection (MongoDB) names in a Nexus database, for suggestions. */
+export function useObjectNames(catalog: NexusDatabaseRef[], engine: DatabaseEngine, database: string | undefined): string[] {
+  const db = database ? catalog.find((d) => d.engine === engine && d.name === database) : undefined;
+  const path = db ? (engine === "mongodb" ? `/documents/${db.id}/collections` : `/databases/${db.id}/tables`) : null;
+  const { data } = useApi<{ name: string }[]>(path);
+  return db ? (data ?? []).map((x) => x.name) : [];
+}
+
+/** A text box that suggests existing names but still accepts anything typed. */
+export function SuggestInput({ value, onChange, options, id, placeholder }: { value: string; onChange: (v: string) => void; options: string[]; id?: string; placeholder?: string }) {
+  const listId = useId();
+  return (
+    <>
+      <input id={id} className="input" list={listId} value={value} placeholder={placeholder ?? (options.length ? "Choose or type a name…" : "")} onChange={(e) => onChange(e.target.value)} />
+      <datalist id={listId}>{options.map((o) => <option key={o} value={o} />)}</datalist>
+    </>
+  );
 }
 
 const LABELS: Record<string, string> = {
@@ -29,32 +65,67 @@ const PATH_KEYS = new Set(["path", "script"]);
 const human = (k: string) => LABELS[k] ?? k.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
 const typeOf = (s: JsonSchema): string => (Array.isArray(s.type) ? s.type.find((t) => t !== "null") ?? "string" : s.type ?? (s.enum ? "string" : s.properties ? "object" : "any"));
 
+const OTHER = "other-engine:";
+
 /** Nexus database or saved-secret connection (the `connection` setting of database blocks). */
 function ConnectionField({ value, onChange, ctx }: { value: unknown; onChange: (v: unknown) => void; ctx: FormContext }) {
   const v = (value ?? {}) as { database?: string; secret?: string };
   const external = v.secret !== undefined;
+  const engine: DatabaseEngine = ctx.connectionKind ?? "postgresql";
+  const otherEngine: DatabaseEngine = engine === "mongodb" ? "postgresql" : "mongodb";
+  const own = ctx.catalog.filter((d) => d.engine === engine);
+  const others = ctx.catalog.filter((d) => d.engine === otherEngine);
   return (
     <div className="block-field">
       <span className="block-label">Connection<span className="req">*</span></span>
       <div className="segmented" role="radiogroup" aria-label="Connection kind">
-        <button type="button" className={!external ? "active" : ""} onClick={() => onChange({ database: ctx.databases[0] ?? "" })}>Nexus database</button>
+        <button type="button" className={!external ? "active" : ""} onClick={() => onChange({ database: own[0]?.name ?? "" })}>Nexus database</button>
         <button type="button" className={external ? "active" : ""} onClick={() => onChange({ secret: ctx.secrets[0] ?? "" })}>Other server</button>
       </div>
       {!external ? (
-        <select className="select" value={v.database ?? ""} onChange={(e) => onChange({ database: e.target.value })}>
-          <option value="">Choose a database…</option>
-          {ctx.databases.map((d) => <option key={d}>{d}</option>)}
-        </select>
+        <>
+          <select
+            className="select"
+            value={v.database ?? ""}
+            onChange={(e) => {
+              const picked = e.target.value;
+              if (picked.startsWith(OTHER)) ctx.onSwitchEngine?.(otherEngine, picked.slice(OTHER.length));
+              else onChange({ database: picked });
+            }}
+          >
+            <option value="">{ctx.catalog.length ? "Choose a database…" : "No Nexus databases yet"}</option>
+            {own.length > 0 && <optgroup label={ENGINE_LABEL[engine]}>{own.map((d) => <option key={d.id} value={d.name}>{d.name}</option>)}</optgroup>}
+            {others.length > 0 && (
+              <optgroup label={ctx.onSwitchEngine ? `${ENGINE_LABEL[otherEngine]} (switches this block)` : `${ENGINE_LABEL[otherEngine]} (not supported by this block)`}>
+                {others.map((d) => <option key={d.id} value={OTHER + d.name} disabled={!ctx.onSwitchEngine}>{d.name}</option>)}
+              </optgroup>
+            )}
+          </select>
+          {!own.length && others.length > 0 && !ctx.onSwitchEngine && (
+            <small className="muted">This block works with {ENGINE_LABEL[engine]} databases. Your {ENGINE_LABEL[otherEngine]} databases can be read with the {ENGINE_LABEL[otherEngine]} block.</small>
+          )}
+        </>
       ) : (
         <>
           <select className="select" value={v.secret ?? ""} onChange={(e) => onChange({ secret: e.target.value })}>
             <option value="">Choose a saved secret…</option>
             {ctx.secrets.map((s) => <option key={s}>{s}</option>)}
           </select>
-          <small className="muted">The secret holds the server's address, e.g. postgresql://user:password@server:5432/database.</small>
+          <small className="muted">The secret holds the server's address, e.g. {engine === "mongodb" ? "mongodb+srv://user:password@server/database" : "postgresql://user:password@server:5432/database"}.</small>
         </>
       )}
     </div>
+  );
+}
+
+/** Table or collection name, suggesting what already exists in the chosen Nexus database. */
+function ObjectNameField({ label, required, value, onChange, ctx }: { label: string; required: boolean; value: unknown; onChange: (v: unknown) => void; ctx: FormContext }) {
+  const names = useObjectNames(ctx.catalog, ctx.connectionKind ?? "postgresql", ctx.connectionDatabase);
+  return (
+    <label className="block-field">
+      <span className="block-label">{label}{required && <span className="req">*</span>}</span>
+      <SuggestInput value={String(value ?? "")} options={names} onChange={(v) => onChange(v || undefined)} />
+    </label>
   );
 }
 
@@ -113,6 +184,9 @@ function Field({ name, schema, required, value, onChange, ctx }: { name: string;
   const label = human(name);
   const req = required ? <span className="req">*</span> : null;
   if (name === "connection") return <ConnectionField value={value} onChange={onChange} ctx={ctx} />;
+  if (ctx.connectionDatabase && ((name === "table" && ctx.connectionKind !== "mongodb") || (name === "collection" && ctx.connectionKind === "mongodb"))) {
+    return <ObjectNameField label={label} required={required} value={value} onChange={onChange} ctx={ctx} />;
+  }
   if (name === "secretHeaders") return <KeyValueField label={label} value={value as Record<string, string>} onChange={onChange} secretValues ctx={ctx} />;
   if (schema.anyOf || schema.oneOf) {
     const opts = (schema.anyOf ?? schema.oneOf)!.filter((o) => o.type !== "null");

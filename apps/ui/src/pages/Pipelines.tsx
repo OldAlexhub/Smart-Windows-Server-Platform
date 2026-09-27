@@ -3,6 +3,7 @@ import { useState } from "react";
 import { Link, useNavigate } from "react-router";
 import type { DatabaseSummary } from "@nexus/shared/contracts";
 import type { Me } from "../App";
+import { ENGINE_LABEL, SuggestInput, useObjectNames, type DatabaseEngine, type NexusDatabaseRef } from "../components/BlockForm";
 import { DescribePipeline } from "../components/DescribePipeline";
 import { PageHead } from "../components/Layout";
 import { Empty, ErrorNote, Modal, Spinner, Status } from "../components/ui";
@@ -146,20 +147,50 @@ export function Pipelines({ me }: { me: Me }) {
 
 // ---------------------------------------------------------------- Create Pipeline
 
-function TemplateFieldInput({ f, value, onChange, databases, secrets }: { f: TemplateField; value: string; onChange: (v: string) => void; databases: string[]; secrets: string[] }) {
+/** Templates that exist for both database families: picking the other kind of database switches to the twin. */
+const TWINS: Record<string, { template: string; engine: DatabaseEngine; rename: [string, string] }> = {
+  "database-to-warehouse": { template: "mongodb-to-warehouse", engine: "mongodb", rename: ["table", "collection"] },
+  "mongodb-to-warehouse": { template: "database-to-warehouse", engine: "postgresql", rename: ["collection", "table"] },
+};
+const OTHER = "other-engine:";
+
+function DatabasePicker({ engine, value, onChange, catalog, onSwitch, id }: { engine: DatabaseEngine; value: string; onChange: (v: string) => void; catalog: NexusDatabaseRef[]; onSwitch?: (database: string) => void; id: string }) {
+  const own = catalog.filter((d) => d.engine === engine);
+  const others = catalog.filter((d) => d.engine !== engine);
+  const otherEngine: DatabaseEngine = engine === "mongodb" ? "postgresql" : "mongodb";
+  return (
+    <select className="select" id={id} value={value} onChange={(e) => (e.target.value.startsWith(OTHER) ? onSwitch?.(e.target.value.slice(OTHER.length)) : onChange(e.target.value))}>
+      <option value="">{catalog.length ? "Choose a database…" : "No databases yet"}</option>
+      {own.length > 0 && <optgroup label={ENGINE_LABEL[engine]}>{own.map((d) => <option key={d.id} value={d.name}>{d.name}</option>)}</optgroup>}
+      {others.length > 0 && (
+        <optgroup label={onSwitch ? ENGINE_LABEL[otherEngine] : `${ENGINE_LABEL[otherEngine]} (not supported by this template)`}>
+          {others.map((d) => <option key={d.id} value={OTHER + d.name} disabled={!onSwitch}>{d.name}</option>)}
+        </optgroup>
+      )}
+    </select>
+  );
+}
+
+function ObjectNameInput({ engine, database, catalog, value, onChange, id }: { engine: DatabaseEngine; database: string | undefined; catalog: NexusDatabaseRef[]; value: string; onChange: (v: string) => void; id: string }) {
+  const names = useObjectNames(catalog, engine, database);
+  return <SuggestInput id={id} value={value} options={names} onChange={onChange} placeholder={database ? undefined : `Choose the database first, or type a ${engine === "mongodb" ? "collection" : "table"} name`} />;
+}
+
+function TemplateFieldInput({ f, value, onChange, answers, catalog, secrets, onSwitch }: { f: TemplateField; value: string; onChange: (v: string) => void; answers: Record<string, string>; catalog: NexusDatabaseRef[]; secrets: string[]; onSwitch?: (database: string) => void }) {
   const common = { id: `tf-${f.name}`, value, onChange: (e: { target: { value: string } }) => onChange(e.target.value) };
   switch (f.kind) {
     case "database":
-      return (
-        <select className="select" {...common}>
-          <option value="">Choose a database…</option>
-          {databases.map((d) => <option key={d}>{d}</option>)}
-        </select>
-      );
+      return <DatabasePicker id={common.id} engine="postgresql" value={value} onChange={onChange} catalog={catalog} onSwitch={onSwitch} />;
+    case "document_database":
+      return <DatabasePicker id={common.id} engine="mongodb" value={value} onChange={onChange} catalog={catalog} onSwitch={onSwitch} />;
+    case "table":
+      return <ObjectNameInput id={common.id} engine="postgresql" database={answers.database} catalog={catalog} value={value} onChange={onChange} />;
+    case "collection":
+      return <ObjectNameInput id={common.id} engine="mongodb" database={answers.database} catalog={catalog} value={value} onChange={onChange} />;
     case "secret":
       return (
         <select className="select" {...common}>
-          <option value="">{secrets.length ? "No key" : "No saved secrets yet"}</option>
+          <option value="">{secrets.length ? "Choose a saved secret…" : "No saved secrets yet"}</option>
           {secrets.map((s) => <option key={s}>{s}</option>)}
         </select>
       );
@@ -187,12 +218,23 @@ export function NewPipeline() {
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<ApiError | null>(null);
-  const databases = (dbs ?? []).filter((d) => d.engine === "postgresql").map((d) => d.name);
+  const catalog: NexusDatabaseRef[] = (dbs ?? []).map((d) => ({ id: d.id, name: d.name, engine: d.engine }));
   const secrets = (secretList ?? []).map((s) => s.name);
 
   function choose(t: Template) {
     setTemplate(t);
     setAnswers(Object.fromEntries(t.fields.map((f) => [f.name, f.default ?? ""])));
+    setErr(null);
+  }
+  /** Moves the answers so far onto the same template for the other database family. */
+  function switchTwin(database: string) {
+    const twin = template && TWINS[template.id];
+    const next = twin && data?.templates.find((t) => t.id === twin.template);
+    if (!twin || !next) return;
+    const [from, to] = twin.rename;
+    const carried: Record<string, string> = { ...answers, database, [to]: answers[from] ?? "" };
+    setTemplate(next);
+    setAnswers({ ...(answers.name ? { name: answers.name } : {}), ...Object.fromEntries(next.fields.map((f) => [f.name, carried[f.name] ?? f.default ?? ""])) });
     setErr(null);
   }
   async function create() {
@@ -253,7 +295,7 @@ export function NewPipeline() {
           {template.fields.map((f) => (
             <label className="field" key={f.name} htmlFor={`tf-${f.name}`}>
               <span>{f.label}{f.required && <span className="req">*</span>}</span>
-              <TemplateFieldInput f={f} value={answers[f.name] ?? ""} onChange={(v) => setAnswers({ ...answers, [f.name]: v })} databases={databases} secrets={secrets} />
+              <TemplateFieldInput f={f} value={answers[f.name] ?? ""} onChange={(v) => setAnswers({ ...answers, [f.name]: v })} answers={answers} catalog={catalog} secrets={secrets} onSwitch={TWINS[template.id] ? switchTwin : undefined} />
               {f.help && <small className="muted">{f.help}</small>}
             </label>
           ))}

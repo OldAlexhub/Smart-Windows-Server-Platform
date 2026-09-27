@@ -4,6 +4,9 @@ import { describeTemplates, INTENTS, instantiateTemplate, TEMPLATES, toYaml } fr
 /** Plausible answers for every question a template can ask. */
 const ANSWERS: Record<string, string> = {
   database: "TaxiOps",
+  collection: "visits",
+  mongoSecret: "external_mongodb",
+  databaseName: "operations",
   table: "trips",
   target: "analytics.trips",
   file: "C:\\Data\\trips.xlsx",
@@ -20,6 +23,8 @@ describe("pipeline templates", () => {
   it("offers every template from the spec, each tied to a Create Pipeline choice", () => {
     expect(TEMPLATES.map((t) => t.name)).toEqual([
       "Database → Warehouse",
+      "MongoDB → Warehouse",
+      "External MongoDB → Warehouse",
       "Excel → Database",
       "Excel → Warehouse",
       "API → Database",
@@ -59,6 +64,13 @@ describe("pipeline templates", () => {
 
     const api = instantiateTemplate("api-to-warehouse", { ...ANSWERS, header: "X-Api-Key" });
     expect(api.steps[0]!.with).toMatchObject({ records: "data.items", secretHeaders: { "X-Api-Key": "trips_api" } });
+
+    const mongo = instantiateTemplate("mongodb-to-warehouse", ANSWERS);
+    expect(mongo.steps.map((s) => s.uses)).toEqual(["mongodb.read", "warehouse.write"]);
+    expect(mongo.steps[0]!.with).toMatchObject({ connection: { database: "TaxiOps" }, collection: "visits" });
+
+    const externalMongo = instantiateTemplate("external-mongodb-to-warehouse", ANSWERS);
+    expect(externalMongo.steps[0]!.with).toMatchObject({ connection: { secret: "external_mongodb" }, databaseName: "operations", collection: "visits" });
 
     const pq = instantiateTemplate("postgresql-to-parquet", ANSWERS);
     expect(pq.schedule).toEqual({ type: "manual" });

@@ -28,6 +28,12 @@ const connection = z.union([
   z.object({ secret: z.string().min(1) }).strict(),
 ]);
 
+const mongoCollection = z
+  .string()
+  .min(1)
+  .max(120)
+  .refine((v) => !v.includes("\0") && !v.includes("$") && !v.startsWith("system."), "Use a regular MongoDB collection name (not system.* and without $).");
+
 const path = z.string().min(1).max(1000);
 const identifier = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,62}$/, "Use letters, numbers and underscores (starting with a letter).");
 const tableName = z.string().regex(/^([A-Za-z_][A-Za-z0-9_]{0,62}\.)?[A-Za-z_][A-Za-z0-9_]{0,62}$/, "Use a table name like trips or analytics.trips.");
@@ -77,6 +83,25 @@ export const BLOCKS: BlockSpec[] = [
     description: "Read a table or query from a Nexus database or an external PostgreSQL server.",
     inputs: SOURCE,
     config: readSource.extend({ connection }).strict().refine(exactlyOneOf, { message: "Choose a table or write a query (not both)." }),
+  },
+  {
+    kind: "mongodb.read",
+    category: "source",
+    label: "MongoDB",
+    description: "Read a collection from a Nexus document database or an external MongoDB server.",
+    inputs: SOURCE,
+    config: z
+      .object({
+        connection,
+        /** Optional for external addresses; managed Nexus connections already identify their database. */
+        databaseName: z.string().min(1).max(120).optional(),
+        collection: mongoCollection,
+        /** MongoDB Extended JSON is accepted, so filters can include ObjectIds and dates. */
+        filter: z.record(z.string(), z.unknown()).default({}),
+        projection: z.record(z.string(), z.union([z.literal(0), z.literal(1)])).optional(),
+        batchSize: z.number().int().min(1).max(10_000).default(1000),
+      })
+      .strict(),
   },
   {
     kind: "sqlite.read",
