@@ -104,7 +104,7 @@ describe("Add Application → deploy (primary scenario, dependency-free app)", (
     // DATABASE_URL, JWT_SECRET, UPLOAD_DIR, STRIPE_API_KEY, PORT (Nexus's own NEXUS_* variables aren't counted)
     expect(r.body.findings).toEqual(["Node.js backend", "PostgreSQL database", "File uploads", "5 settings"]);
     expect(r.body.settingsNeeded).toEqual(["STRIPE_API_KEY"]);
-    expect(r.body.analysis.healthPath).toBe("/health");
+    expect(r.body.analysis.health).toMatchObject({ mode: "automatic", candidate: { path: "/health", evidence: "Node.js route in server.js" }, endpoint: null });
   });
 
   it("creates the database, connects, deploys, configures access and verifies", async () => {
@@ -163,6 +163,16 @@ describe("Add Application → deploy (primary scenario, dependency-free app)", (
     expect(JSON.parse((await get(gwPorts.localPort, "taxiops.nexus.localhost")).body).stripe).toBe("sk_live_123456");
   }, 60_000);
 
+  it("supports a user-configured health endpoint without restarting the app", async () => {
+    const before = (await call("GET", "/api/v1/apps/taxiops/developer")).body.pid;
+    const saved = await call("PUT", "/api/v1/apps/taxiops/health", { mode: "custom", path: "/health" });
+    expect(saved.status).toBe(200);
+    expect(saved.body).toMatchObject({ restartNeeded: false, health: { mode: "custom", endpoint: { path: "/health", source: "user", validated: true } } });
+    const detail = await call("GET", "/api/v1/apps/taxiops");
+    expect(detail.body.analysis.health.endpoint).toMatchObject({ path: "/health", source: "user" });
+    expect((await call("GET", "/api/v1/apps/taxiops/developer")).body.pid).toBe(before);
+  });
+
   it("stop and start", async () => {
     await call("POST", "/api/v1/apps/taxiops/stop");
     expect((await call("GET", "/api/v1/apps/taxiops")).body.status).toBe("stopped");
@@ -178,6 +188,7 @@ describe("Add Application → deploy (primary scenario, dependency-free app)", (
     const job = await waitJob((await call("POST", "/api/v1/apps/taxiops/deploy")).body.jobId);
     expect(job.status).toBe("succeeded");
     expect(JSON.parse((await get(gwPorts.localPort, "taxiops.nexus.localhost")).body).version).toBe("1.4.8");
+    expect((await call("GET", "/api/v1/apps/taxiops")).body.analysis.health.endpoint).toMatchObject({ path: "/health", source: "user" });
 
     const detail = await call("GET", "/api/v1/apps/taxiops");
     expect(detail.body.deployments.map((d: { version: string; status: string }) => `${d.version}:${d.status}`)).toEqual(["v1.4.8:active", "v1.4.7:superseded"]);
@@ -252,4 +263,37 @@ describe("deleting databases", () => {
     expect(ctx.databases!.require(appDb).appIds).toEqual([]);
     expect((await call("DELETE", `/api/v1/databases/${appDb}`, { confirmation: "TaxiOps" })).status).toBe(200);
   }, 120_000);
+});
+
+describe("automatic health self-correction", () => {
+  it("keeps a VDP-like HTTP server running when an inferred /health route returns 404", async () => {
+    const dir = join(home, "src", "VDP");
+    project(dir, {
+      "package.json": JSON.stringify({ name: "vdp", version: "1.0.0", scripts: { start: "node server.js" }, dependencies: {} }),
+      "server.js": `const http=require("http"); function routesThatAreNotMounted(app){ app.get("/health",()=>{}); } http.createServer((req,res)=>{res.statusCode=404;res.end("not found")}).listen(Number(process.env.PORT),"127.0.0.1");`,
+    });
+    const created = await call("POST", "/api/v1/apps", { sourceDir: dir, name: "vdp", data: { mode: "none" }, access: "private" });
+    const job = await waitJob(created.body.jobId);
+    expect(job.status).toBe("succeeded");
+    let detail = await call("GET", "/api/v1/apps/vdp");
+    expect(detail.body).toMatchObject({ status: "running", analysis: { health: { candidate: { path: "/health" }, endpoint: null, rejection: { path: "/health", status: 404 } } } });
+
+    // Simulate an application stored by an older Nexus version, which only had healthPath.
+    await call("POST", "/api/v1/apps/vdp/stop");
+    const legacy = { ...apps.require("vdp").analysis, healthPath: "/health" } as Record<string, unknown>;
+    delete legacy.health;
+    ctx.store.run("UPDATE apps SET analysis = ? WHERE id = ?", [JSON.stringify(legacy), "vdp"]);
+    expect((await call("POST", "/api/v1/apps/vdp/start")).body.status).toBe("running");
+    const pid = (await call("GET", "/api/v1/apps/vdp/developer")).body.pid;
+    const checks = await call("GET", "/api/v1/apps/vdp/verify");
+    expect(checks.body[0]).toMatchObject({ label: "Application", ok: true });
+    expect(checks.body[0].detail).toContain("HTTP 404");
+    detail = await call("GET", "/api/v1/apps/vdp");
+    expect(detail.body.analysis.health).toMatchObject({ mode: "automatic", endpoint: null, rejection: { path: "/health", status: 404 } });
+
+    // Two continuous-monitor intervals: no restart loop and no PID change.
+    await new Promise((resolve) => setTimeout(resolve, 31_000));
+    expect((await call("GET", "/api/v1/apps/vdp")).body.status).toBe("running");
+    expect((await call("GET", "/api/v1/apps/vdp/developer")).body.pid).toBe(pid);
+  }, 180_000);
 });

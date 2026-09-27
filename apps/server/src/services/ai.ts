@@ -168,6 +168,11 @@ export class AiService {
     const lines: string[] = [];
     for (const { a, s } of apps) {
       lines.push(`App ${a.name}: ${s.status}, CPU ${s.cpuPercent.toFixed(0)}%, memory ${formatBytes(s.memoryBytes)}${s.problem ? `, problem: ${s.problem.title} — ${s.problem.summary}` : ""}`);
+      if (a.analysis.health.rejection) {
+        lines.push(`  Observed: detected health candidate ${a.analysis.health.rejection.path} was rejected (${a.analysis.health.rejection.reason}). The app uses general HTTP liveness monitoring.`);
+      } else if (a.analysis.health.endpoint) {
+        lines.push(`  Observed: health endpoint ${a.analysis.health.endpoint.path} is trusted because its source is ${a.analysis.health.endpoint.source}.`);
+      }
       const counts = this.ctx.logs.countsFor(`app:${a.id}`);
       if (counts.errors) lines.push(`  ${a.name} logged ${counts.errors} errors today`);
     }
@@ -200,7 +205,9 @@ export class AiService {
       const messages: ChatMessage[] = [
         {
           role: "system",
-          content: `You are ${BRAND.assistantName}, the assistant inside ${BRAND.productName}, a private application server. Answer in plain, friendly English for a business owner. Be brief. Never claim you changed anything; you can only recommend. Current server facts:\n${facts.join("\n")}`,
+          content: `You are ${BRAND.assistantName}, the assistant inside ${BRAND.productName}, a private application server. Answer in plain, friendly English for a business owner. Be brief. Never claim you changed anything; you can only recommend.
+Treat the supplied facts as authoritative observations. Clearly distinguish OBSERVED facts, INFERRED conclusions, and POSSIBLE causes. Never invent a database, restart, or dependency theory when the observations identify a more direct cause. An HTTP 404 proves an HTTP server responded; it does not prove the process crashed. A 404 from a detected-but-unvalidated health candidate means the candidate may be wrong and general monitoring should be used. Only describe a database problem when the facts contain database-failure evidence.
+Current server facts:\n${facts.join("\n")}`,
         },
         // The last few turns, so follow-up questions ("and the other one?") make sense.
         ...history.filter((m) => m.role !== "system").slice(-8).map((m) => ({ role: m.role, content: m.content.slice(0, 2000) })),

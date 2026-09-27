@@ -32,6 +32,7 @@ export interface RunExplanation {
 
 const SYSTEM = `You are ${BRAND.assistantName}, the assistant inside ${BRAND.productName}, a private server run by a business owner.
 Explain technical problems in plain, friendly English without jargon. Never claim you changed anything — you can only recommend.
+Use observed structured checks before log speculation. Clearly distinguish OBSERVED facts, INFERRED conclusions, and POSSIBLE causes. Do not invent a database or restart theory without evidence. HTTP 404 means an HTTP server responded; when it came from an automatically detected health candidate, explain that the candidate may be wrong and recommend automatic/general monitoring. A user-configured or runtime-validated endpoint is authoritative and may use strict status semantics.
 Answer with JSON only: {"explanation": "2–4 sentences: what happened and the most likely reason", "steps": ["up to 4 short, concrete next steps"]}.`;
 
 function parseExplanation(text: string): AiExplanation | null {
@@ -78,6 +79,8 @@ export class ExplainService {
       `Memory ${Math.round(summary.memoryBytes / 1024 / 1024)} MB, CPU ${summary.cpuPercent.toFixed(0)}%.`,
       app.databaseId ? "It uses a Nexus PostgreSQL database." : app.documentDatabaseId ? "It uses a Nexus document (MongoDB-compatible) database." : "It has no Nexus database.",
       problem ? `Nexus's own diagnosis: ${problem.title} — ${problem.summary}${problem.cause ? ` (${problem.cause})` : ""}` : "",
+      ...(problem?.checks ?? []).map((check) => `Observed check: ${check.label} = ${check.status}${check.detail ? ` (${check.detail})` : ""}.`),
+      app.analysis.health.rejection ? `Observed health monitoring: detected candidate ${app.analysis.health.rejection.path} was rejected because ${app.analysis.health.rejection.reason} Nexus fell back to general HTTP liveness.` : "",
     ].filter(Boolean);
     const ai = await this.ask([
       { role: "system", content: SYSTEM },

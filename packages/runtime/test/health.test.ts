@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import type { HealthMonitoring } from "@nexus/shared";
 import {
   AppSupervisor,
   buildIsolatedEnv,
@@ -51,6 +52,24 @@ async function app(script: string) {
 const SERVER = `require("http").createServer((q,s)=>{s.statusCode=q.url==="/health"?200:404;s.end("x")}).listen(+process.env.PORT,"127.0.0.1");`;
 const CRASH_ONCE = `const fs=require("fs");const f="crashed.flag";require("http").createServer((q,s)=>s.end("ok")).listen(+process.env.PORT,"127.0.0.1",()=>{if(!fs.existsSync(f)){fs.writeFileSync(f,"1");setTimeout(()=>process.exit(1),1000)}});`;
 const ALWAYS_CRASH = `require("http").createServer().listen(+process.env.PORT,"127.0.0.1",()=>setTimeout(()=>{console.error("Error: relation \\"drivers\\" does not exist");process.exit(1)},150));`;
+const automatic = (candidate: string | null = null): HealthMonitoring => ({
+  mode: "automatic",
+  candidate: candidate ? { path: candidate, evidence: "Express route in server.js" } : null,
+  endpoint: null,
+  rejection: null,
+});
+const validated = (path = "/health"): HealthMonitoring => ({
+  mode: "automatic",
+  candidate: { path, evidence: "Express route in server.js" },
+  endpoint: { path, source: "detected", validated: true },
+  rejection: null,
+});
+const custom = (path = "/health"): HealthMonitoring => ({
+  mode: "custom",
+  candidate: null,
+  endpoint: { path, source: "user", validated: true },
+  rejection: null,
+});
 
 let fakePid = 80_000;
 class FakeProcess implements ManagedProcess {
@@ -120,7 +139,7 @@ function waitFor(events: HealthEvent[], kind: HealthEvent["kind"], ms = 15_000):
 }
 
 function monitor(sup: AppSupervisor, cfg: Partial<ConstructorParameters<typeof HealthMonitor>[1]> = {}, deps: ConstructorParameters<typeof HealthMonitor>[2] = {}) {
-  const m = new HealthMonitor(sup, { appName: "TaxiOps", healthPath: null, intervalMs: 100_000, restart: { maxRestarts: 3, windowMs: 60_000, backoffMs: [50, 50, 50] }, ...cfg }, deps);
+  const m = new HealthMonitor(sup, { appName: "TaxiOps", health: automatic(), intervalMs: 100_000, restart: { maxRestarts: 3, windowMs: 60_000, backoffMs: [50, 50, 50] }, ...cfg }, deps);
   const events: HealthEvent[] = [];
   m.on("event", (e) => events.push(e));
   m.start();
@@ -173,20 +192,55 @@ describe("HealthMonitor", () => {
     expect(events.map((e) => e.kind)).toEqual(["unhealthy", "restarting", "recovered"]);
   });
 
-  it("explicit health endpoints must succeed; '/' only needs to answer", async () => {
+  it("validates a detected endpoint, while general liveness accepts route-level responses", async () => {
     const sup = await app(SERVER);
     await sup.start();
-    const withPath = monitor(sup, { healthPath: "/missing", failureThreshold: 99 });
-    await withPath.m.check();
-    expect(withPath.m.lastProbe).toMatchObject({ ok: false, status: 404 });
-    withPath.m.dispose();
-
-    const root = monitor(sup, { healthPath: null });
+    const root = monitor(sup);
     await root.m.check();
     expect(root.m.lastProbe).toMatchObject({ ok: true, status: 404 }); // alive, just no page at "/"
-    const good = monitor(sup, { healthPath: "/health" });
+    root.m.dispose();
+
+    const good = monitor(sup, { health: automatic("/health") });
     await good.m.check();
     expect(good.m.lastProbe).toMatchObject({ ok: true, status: 200 });
+    expect(good.m.diagnostics().monitoring.endpoint).toEqual({ path: "/health", source: "detected", validated: true });
+  });
+
+  it("rejects a detected 404, falls back to '/', and never restarts the responding app", async () => {
+    const { sup } = await fakeApp();
+    const seen: string[] = [];
+    const { m, events } = monitor(sup, { health: automatic("/health"), failureThreshold: 1 }, {
+      probe: async (url) => {
+        seen.push(new URL(url).pathname);
+        return { ok: true, status: 404, ms: 7 };
+      },
+    });
+    const pid = sup.pid;
+    await m.check();
+    await m.check();
+    await m.check();
+    expect(seen).toEqual(["/health", "/", "/", "/"]);
+    expect(m.diagnostics().monitoring.rejection).toMatchObject({ path: "/health", status: 404 });
+    expect(m.diagnostics().lastSuccessfulProbe).toMatchObject({ status: 404, url: expect.stringMatching(/\/$/) });
+    expect(events.filter((e) => e.kind === "health_candidate_rejected")).toHaveLength(1);
+    expect(events.some((e) => e.kind === "restarting")).toBe(false);
+    expect(sup.pid).toBe(pid);
+  });
+
+  it.each([401, 403, 404])("treats HTTP %s from '/' as proof of liveness", async (status) => {
+    const { sup } = await fakeApp();
+    const { m, events } = monitor(sup, { failureThreshold: 1 }, { probe: async () => ({ ok: true, status, ms: 2 }) });
+    await m.check();
+    expect(m.lastProbe).toMatchObject({ ok: true, status });
+    expect(events).toEqual([]);
+  });
+
+  it("keeps strict semantics for a user-configured endpoint", async () => {
+    const { sup } = await fakeApp();
+    const { m, events } = monitor(sup, { health: custom(), failureThreshold: 1 }, { probe: async () => ({ ok: true, status: 404, ms: 2 }) });
+    await m.check();
+    expect(events.find((e) => e.kind === "unhealthy")?.failure).toMatchObject({ kind: "http_error" });
+    expect(events.some((e) => e.kind === "restarting")).toBe(true);
   });
 
   it("restarts after sustained memory overuse", async () => {
@@ -216,7 +270,7 @@ describe("HealthMonitor", () => {
 
   it("diagnoses HTTP 5xx separately from transport failures", async () => {
     const { sup } = await fakeApp();
-    const { m, events } = monitor(sup, { healthPath: "/health", failureThreshold: 1 }, { probe: async () => ({ ok: true, status: 503, ms: 8 }) });
+    const { m, events } = monitor(sup, { health: validated(), failureThreshold: 1 }, { probe: async () => ({ ok: true, status: 503, ms: 8 }) });
     await m.check();
     const failed = events.find((e) => e.kind === "unhealthy");
     expect(failed?.failure).toMatchObject({ kind: "http_error", detail: "HTTP 503 after 8 ms" });

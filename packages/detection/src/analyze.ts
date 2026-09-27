@@ -93,7 +93,7 @@ export function analyzeProject(root: string): ProjectAnalysis {
     database: { required: false, kind: null, evidence: [], libraries: [], patterns: [] },
     storage: { required: false, evidence: [] },
     port: { value: null, envVar: null, evidence: null },
-    healthPath: null,
+    health: { mode: "automatic", candidate: null, endpoint: null, rejection: null },
     migrations: null,
     hasDockerfile: snap.files.some((f) => /(^|\/)Dockerfile$/.test(f)),
     externalAccessRecommended: components.length > 0,

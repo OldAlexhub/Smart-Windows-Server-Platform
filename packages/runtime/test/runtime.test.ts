@@ -159,6 +159,18 @@ describe("AppSupervisor with ProcessIsolationProvider (real processes)", () => {
     expect(sup.detail).toMatch(/not answering/);
   });
 
+  it("allows a slow application about 20 seconds to become ready before monitoring", async () => {
+    const { release, home } = workspace({
+      "slow.js": `const http=require("http");setTimeout(()=>http.createServer((q,s)=>s.end("ready")).listen(Number(process.env.PORT),"127.0.0.1"),20000);`,
+    });
+    const sup = new AppSupervisor(config(release, home, "slow.js", await freePort(), { startupTimeoutMs: 30_000 }), new ProcessIsolationProvider());
+    sups.push(sup);
+    const started = Date.now();
+    expect(await sup.start()).toBe("running");
+    expect(Date.now() - started).toBeGreaterThanOrEqual(19_000);
+    expect(sup.status).toBe("running");
+  }, 35_000);
+
   it("stop kills the whole process tree (npm → node style)", async () => {
     const { release, home } = workspace({
       "parent.js": `const {spawn}=require("child_process");const c=spawn(process.execPath,["server.js"],{stdio:"inherit",env:process.env});setInterval(()=>{},1000);`,

@@ -144,7 +144,7 @@ export function appRoutes(apps: AppManager): RouteModule {
       return {
         ...apps.summary(a),
         sourceDir: a.sourceDir,
-        analysis: { summary: a.analysis.summary, components: a.analysis.components.map((c) => ({ role: c.role, framework: c.framework, path: c.path })), healthPath: a.analysis.healthPath },
+        analysis: { summary: a.analysis.summary, components: a.analysis.components.map((c) => ({ role: c.role, framework: c.framework, path: c.path })), health: a.analysis.health },
         database: db ? { id: db.id, name: db.name } : null,
         publicHosts: a.publicHosts,
         addresses: apps.addresses(id),
@@ -342,6 +342,18 @@ export function appRoutes(apps: AppManager): RouteModule {
       apps.setEnv(id, name, value);
       ctx.audit.record({ actor: { type: "user", id: user.id, name: user.displayName }, action: "app.setting", target: { type: "app", id }, details: { name } });
       return { ok: true, restartNeeded: true };
+    });
+
+    app.put("/api/v1/apps/:id/health", async (req) => {
+      const id = (req.params as { id: string }).id;
+      const user = requirePermission(req, "app.configure", id);
+      const body = z.discriminatedUnion("mode", [
+        z.object({ mode: z.literal("automatic") }),
+        z.object({ mode: z.literal("custom"), path: z.string().min(1).max(256) }),
+      ]).parse(req.body);
+      const health = apps.setHealthMonitoring(id, body.mode, body.mode === "custom" ? body.path : undefined);
+      ctx.audit.record({ actor: { type: "user", id: user.id, name: user.displayName }, action: "app.health_monitoring", target: { type: "app", id }, details: { mode: body.mode, path: body.mode === "custom" ? body.path : null } });
+      return { health, restartNeeded: false };
     });
 
     /** Settings found in the app's own .env files (names only — values never leave the server). */

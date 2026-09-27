@@ -21,6 +21,7 @@ import {
   type AppStatus,
   type AppSummary,
   type FriendlyProblem,
+  type HealthMonitoring,
   type ResourcePolicy,
 } from "@nexus/shared";
 import type { Migration } from "@nexus/state";
@@ -143,6 +144,39 @@ const SWITCH_DRAIN_MS = 5_000;
 /** An app that ignores PORT fails like this when its fixed port is already taken. */
 const PORT_TAKEN = /EADDRINUSE|address already in use|Only one usage of each socket address/i;
 const secretKey = (appId: string, name: string) => `app:${appId}/env/${name}`;
+
+/** Converts pre-provenance analyses into an untrusted candidate. Existing apps self-correct live. */
+export function normalizeHealth(analysis: ProjectAnalysis): HealthMonitoring {
+  const value = analysis.health;
+  if (value?.mode && "candidate" in value && "endpoint" in value) return structuredClone(value);
+  const legacy = analysis.healthPath ?? null;
+  return {
+    mode: "automatic",
+    candidate: legacy ? { path: legacy, evidence: "Legacy automatic detection (the original analyzer did not retain the source file)" } : null,
+    endpoint: null,
+    rejection: null,
+  };
+}
+
+function normalizeAnalysis(analysis: ProjectAnalysis): ProjectAnalysis {
+  const normalized = { ...analysis, health: normalizeHealth(analysis) };
+  delete normalized.healthPath;
+  return normalized;
+}
+
+/** A redeploy may discover a new candidate, but it must never erase a user's explicit setting. */
+function carryHealthConfiguration(previous: HealthMonitoring, detected: HealthMonitoring): HealthMonitoring {
+  if (previous.mode !== "custom" || previous.endpoint?.source !== "user") return detected;
+  return { ...detected, mode: "custom", endpoint: { ...previous.endpoint }, rejection: null };
+}
+
+interface ApplicationProbe {
+  ok: boolean;
+  status: number | null;
+  path: string;
+  kind: "health" | "liveness";
+  detail: string;
+}
 
 /**
  * Application Manager — turns "choose a folder, choose where data goes, choose access"
@@ -447,6 +481,7 @@ export class AppManager {
     // 1. Analyze (fresh — the project may have changed since it was added)
     job.step("analyze", "running");
     const analysis = this.analyze(app.sourceDir);
+    analysis.health = carryHealthConfiguration(app.analysis.health, analysis.health);
     this.update(appId, { analysis });
     app = this.require(appId);
     job.step("analyze", "done", analysis.summary);
@@ -630,7 +665,7 @@ export class AppManager {
       const output: string[] = [];
       const next = await this.launch(appId, release, port, (line) => output.length < 200 && output.push(line));
       const status = await next.start();
-      if (status === "running" && (await this.answers(port, app.analysis.healthPath))) {
+      if (status === "running" && (await this.answers(appId, port))) {
         if (!(await this.switchTo(appId, next, live))) {
           await next.stop();
           log("The secure gateway couldn't be updated, so visitors stay on the current version. Nothing changed; try the update again.");
@@ -720,23 +755,84 @@ export class AppManager {
     }
   }
 
-  /**
-   * Whether a freshly started version really serves requests: its health page (or home page)
-   * answers without a server error. Anything below 500 counts — a login redirect or a 404 on "/"
-   * still means the app is up.
-   */
-  private async answers(port: number, healthPath: string | null): Promise<boolean> {
+  /** Waits for readiness without granting static analysis authority to kill the application. */
+  private async answers(appId: string, port: number): Promise<boolean> {
     const deadline = Date.now() + 30_000;
     while (Date.now() < deadline) {
-      try {
-        const r = await fetch(`http://127.0.0.1:${port}${healthPath ?? "/"}`, { redirect: "manual", signal: AbortSignal.timeout(5_000) });
-        if (healthyHttpStatus(healthPath, r.status)) return true;
-      } catch {
-        // not answering yet
-      }
+      if ((await this.probeApplication(appId, port)).ok) return true;
       await new Promise((r) => setTimeout(r, 500));
     }
     return false;
+  }
+
+  private async fetchStatus(port: number, path: string, timeoutMs = 5_000): Promise<number | null> {
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}${path}`, { redirect: "manual", signal: AbortSignal.timeout(timeoutMs) });
+      await response.body?.cancel();
+      return response.status;
+    } catch {
+      return null;
+    }
+  }
+
+  /** One readiness/verification round, including candidate validation and automatic fallback. */
+  private async probeApplication(appId: string, port: number, timeoutMs = 5_000): Promise<ApplicationProbe> {
+    const app = this.require(appId);
+    const health = app.analysis.health;
+    if (health.endpoint) {
+      const status = await this.fetchStatus(port, health.endpoint.path, timeoutMs);
+      return {
+        ok: status !== null && healthyHttpStatus("health", status),
+        status,
+        path: health.endpoint.path,
+        kind: "health",
+        detail: status === null ? "Health endpoint did not answer" : `Health endpoint returned HTTP ${status}`,
+      };
+    }
+
+    const candidate = health.mode === "automatic" && health.candidate && health.rejection?.path !== health.candidate.path ? health.candidate : null;
+    if (candidate) {
+      const status = await this.fetchStatus(port, candidate.path, timeoutMs);
+      if (status !== null && healthyHttpStatus("health", status)) {
+        const promoted: HealthMonitoring = { ...health, endpoint: { path: candidate.path, source: "detected", validated: true }, rejection: null };
+        this.persistHealth(appId, promoted);
+        return { ok: true, status, path: candidate.path, kind: "health", detail: `Validated detected endpoint ${candidate.path} (HTTP ${status})` };
+      }
+      const fallbackStatus = await this.fetchStatus(port, "/", timeoutMs);
+      if (fallbackStatus !== null) {
+        const reason = status === null
+          ? "Detected candidate did not answer while the general HTTP endpoint did."
+          : `Detected candidate returned HTTP ${status}; general HTTP monitoring is responding.`;
+        const rejected: HealthMonitoring = {
+          ...health,
+          endpoint: null,
+          rejection: { path: candidate.path, status, reason, at: new Date().toISOString() },
+        };
+        this.persistHealth(appId, rejected);
+        this.ctx.activity.add("info", `${app.name} is responding. Nexus rejected the detected ${candidate.path} health candidate and switched to general monitoring.`, appId);
+      }
+      return {
+        ok: fallbackStatus !== null && healthyHttpStatus("liveness", fallbackStatus),
+        status: fallbackStatus,
+        path: "/",
+        kind: "liveness",
+        detail: fallbackStatus === null ? "Application did not answer" : `Application responded with HTTP ${fallbackStatus}; ${candidate.path} was not validated`,
+      };
+    }
+
+    const status = await this.fetchStatus(port, "/", timeoutMs);
+    return {
+      ok: status !== null && healthyHttpStatus("liveness", status),
+      status,
+      path: "/",
+      kind: "liveness",
+      detail: status === null ? "Application did not answer" : `Application responded with HTTP ${status}`,
+    };
+  }
+
+  private persistHealth(appId: string, health: HealthMonitoring): void {
+    const app = this.require(appId);
+    this.update(appId, { analysis: { ...app.analysis, health } });
   }
 
   private watch(appId: string, sup: AppSupervisor): void {
@@ -750,7 +846,7 @@ export class AppManager {
     });
     const monitor = new HealthMonitor(
       sup,
-      { appName: app.name, healthPath: app.analysis.healthPath, memoryLimitBytes: app.resources.memoryLimitMb === "auto" ? null : app.resources.memoryLimitMb * 1024 * 1024 },
+      { appName: app.name, health: app.analysis.health, memoryLimitBytes: app.resources.memoryLimitMb === "auto" ? null : app.resources.memoryLimitMb * 1024 * 1024 },
       {
         memoryOf: (pid) => this.ctx.monitoring?.memoryOf(pid) ?? Promise.resolve(null),
         logs: () => {
@@ -772,7 +868,10 @@ export class AppManager {
       },
     );
     monitor.on("event", (e) => {
-      const kind = e.kind === "recovered" ? "success" : e.kind === "gave_up" ? "problem" : "warning";
+      if ((e.kind === "health_validated" || e.kind === "health_candidate_rejected") && e.diagnostics) {
+        this.persistHealth(appId, e.diagnostics.monitoring);
+      }
+      const kind = e.kind === "recovered" || e.kind === "health_validated" ? "success" : e.kind === "gave_up" ? "problem" : e.kind === "health_candidate_rejected" ? "info" : "warning";
       this.ctx.activity.add(kind, e.message, appId);
       if (e.kind === "gave_up") {
         const titles = {
@@ -961,6 +1060,38 @@ export class AppManager {
     this.update(appId, { resources });
   }
 
+  /** Changes monitoring policy without restarting the application process. */
+  setHealthMonitoring(appId: string, mode: "automatic" | "custom", path?: string): HealthMonitoring {
+    const app = this.require(appId);
+    let health: HealthMonitoring;
+    if (mode === "custom") {
+      const normalized = (path ?? "").trim();
+      if (!/^\/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*$/.test(normalized) || normalized.includes("//") || normalized.length > 256) {
+        throw NexusError.invalid("Enter an application path beginning with /, such as /api/health.");
+      }
+      health = {
+        ...app.analysis.health,
+        mode: "custom",
+        endpoint: { path: normalized, source: "user", validated: true },
+        rejection: null,
+      };
+    } else {
+      health = {
+        ...app.analysis.health,
+        mode: "automatic",
+        endpoint: null,
+        rejection: null,
+      };
+    }
+    this.persistHealth(appId, health);
+    const sup = this.supervisors.get(appId);
+    if (sup?.status === "running") {
+      this.monitors.get(appId)?.dispose();
+      this.watch(appId, sup);
+    }
+    return health;
+  }
+
   /** Setting names and where they come from; secret values are masked. */
   envView(appId: string, reveal: boolean): { name: string; value: string; source: "nexus" | "you"; secret: boolean }[] {
     const app = this.require(appId);
@@ -1024,7 +1155,7 @@ export class AppManager {
       isolation: sup?.isolation ?? { id: "process", label: "Isolated process" },
       release: release ? { version: release.versionLabel, dir: release.releaseDir, commit: release.sourceCommit, python: release.pythonVersion } : null,
       start: sup ? sup.command : main?.start ? { executable: main.start.command, args: main.start.args, cwd: main.path || "." } : null,
-      healthPath: app.analysis.healthPath,
+      health: app.analysis.health,
       migrations: app.analysis.migrations,
       resources: app.resources,
       settings: this.envView(appId, reveal),
@@ -1058,13 +1189,8 @@ export class AppManager {
     const out: VerificationResult[] = [];
     const sup = this.supervisors.get(appId);
     if (sup) {
-      try {
-        const r = await fetch(`http://127.0.0.1:${sup.port}${app.analysis.healthPath ?? "/"}`, { signal: AbortSignal.timeout(10_000), redirect: "manual" });
-        const ok = healthyHttpStatus(app.analysis.healthPath, r.status);
-        out.push({ label: "Application", ok, detail: ok ? "Online" : `Health check answered with an error (${r.status})` });
-      } catch (e) {
-        out.push({ label: "Application", ok: false, detail: "Not answering" });
-      }
+      const probe = await this.probeApplication(appId, sup.port, 10_000);
+      out.push({ label: "Application", ok: probe.ok, detail: probe.ok ? probe.detail : probe.status === null ? "Not answering" : probe.detail });
     } else {
       const main = primary(app.analysis.components);
       out.push({ label: "Application", ok: !!main && !main.start, detail: main && !main.start ? "Served by the gateway" : "Not running" });
@@ -1085,7 +1211,18 @@ export class AppManager {
         out.push({ label: "Storage", ok: false, detail: (e as Error).message });
       }
     }
-    out.push({ label: "Health checks", ok: !!sup || !primary(app.analysis.components)?.start, detail: app.analysis.healthPath ? `Watching ${app.analysis.healthPath}` : "Watching the application" });
+    const currentHealth = this.require(appId).analysis.health;
+    out.push({
+      label: "Health checks",
+      ok: !!sup || !primary(app.analysis.components)?.start,
+      detail: currentHealth.endpoint
+        ? `Watching ${currentHealth.endpoint.path} (${currentHealth.endpoint.source === "user" ? "configured by you" : "runtime validated"})`
+        : currentHealth.rejection
+          ? `${currentHealth.rejection.path} was rejected; using general HTTP monitoring`
+          : currentHealth.candidate
+            ? `Validating ${currentHealth.candidate.path}; general HTTP monitoring remains the fallback`
+            : "General HTTP monitoring",
+    });
     if (app.accessMode !== "private" && app.publicHosts[0]) {
       // Right after publishing the certificate is usually still being issued: that is not a failure.
       const https = await checkHttps({ hostname: app.publicHosts[0], dns: null, gateway: await this.gateway.runtime({ inspectListener: false }) });
@@ -1227,11 +1364,12 @@ export class AppManager {
 }
 
 function toRecord(r: AppRow): AppRecord {
+  const analysis = normalizeAnalysis(fromJson<ProjectAnalysis>(r.analysis, {} as ProjectAnalysis));
   return {
     id: r.id,
     name: r.name,
     sourceDir: r.source_dir,
-    analysis: fromJson<ProjectAnalysis>(r.analysis, {} as ProjectAnalysis),
+    analysis,
     accessMode: r.access_mode,
     publicHosts: fromJson<string[]>(r.public_hosts, []),
     dataMode: r.data_mode,

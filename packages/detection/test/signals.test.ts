@@ -181,12 +181,22 @@ describe("storage, port, health, migrations", () => {
 
   it("finds health endpoints in Express and FastAPI", () => {
     const e = analyzeProject(project({ "package.json": expressPkg(), "server.js": "app.get('/api/health', (req,res)=>res.json({ok:true}))" }));
-    expect(e.healthPath).toBe("/api/health");
+    expect(e.health).toMatchObject({ mode: "automatic", candidate: { path: "/api/health", evidence: "Express route in server.js" }, endpoint: null });
     const f = analyzeProject(
       project({ "requirements.txt": "fastapi", "main.py": 'from fastapi import FastAPI\napp = FastAPI()\n@app.get("/healthz")\ndef h(): pass\n' }),
     );
-    expect(f.healthPath).toBe("/healthz");
-    expect(analyzeProject(project({ "package.json": expressPkg(), "server.js": "" })).healthPath).toBeNull();
+    expect(f.health.candidate).toEqual({ path: "/healthz", evidence: "FastAPI route in main.py" });
+    expect(analyzeProject(project({ "package.json": expressPkg(), "server.js": "" })).health.candidate).toBeNull();
+  });
+
+  it("does not infer health routes from comments, client calls, documentation, or tests", () => {
+    const a = analyzeProject(project({
+      "package.json": expressPkg(),
+      "server.js": "// app.get('/health', handler)\nconst result = await axios.get('/health');\napp.listen(process.env.PORT)",
+      "README.md": "Call GET /health",
+      "server.test.js": "app.get('/health', handler)",
+    }));
+    expect(a.health.candidate).toBeNull();
   });
 
   it("prefers the app's own migrate script", () => {
@@ -234,7 +244,7 @@ describe("full TaxiOps-style analysis", () => {
     expect(a.database.kind).toBe("postgresql");
     expect(a.storage.required).toBe(true);
     expect(a.env).toHaveLength(9); // 8 in .env.example + PORT from code
-    expect(a.healthPath).toBe("/health");
+    expect(a.health.candidate).toEqual({ path: "/health", evidence: "Express route in server/index.js" });
     expect(a.port).toMatchObject({ value: 3001, envVar: "PORT" });
     expect(a.migrations?.command).toEqual({ command: "npm", args: ["run", "migrate"] });
     expect(a.externalAccessRecommended).toBe(true);

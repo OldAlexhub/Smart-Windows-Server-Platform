@@ -1,4 +1,4 @@
-import type { RuntimeKind } from "@nexus/shared";
+import type { HealthMonitoring, RuntimeKind } from "@nexus/shared";
 
 export type ComponentRole = "backend" | "frontend" | "fullstack" | "static";
 
@@ -80,7 +80,9 @@ export interface ProjectAnalysis {
   database: DatabaseRequirement;
   storage: { required: boolean; evidence: string[] };
   port: { value: number | null; envVar: string | null; evidence: string | null };
-  healthPath: string | null;
+  health: HealthMonitoring;
+  /** Pre-provenance persisted analyses used this field. Read only during migration. */
+  healthPath?: string | null;
   migrations: MigrationInfo | null;
   hasDockerfile: boolean;
   externalAccessRecommended: boolean;

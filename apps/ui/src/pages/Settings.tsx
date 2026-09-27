@@ -201,7 +201,7 @@ interface DevInfo {
   isolation: { id: string; label: string };
   release: { version: string; dir: string; commit: string | null; python: string | null } | null;
   start: { executable: string; args: string[]; cwd: string } | null;
-  healthPath: string | null;
+  health: { mode: "automatic" | "custom"; candidate: { path: string; evidence: string } | null; endpoint: { path: string; source: string; validated: boolean } | null; rejection: { path: string; status: number | null; reason: string; at: string } | null };
   migrations: { tool: string; description: string } | null;
   settings: { name: string; value: string; secret: boolean }[];
   managedVariables: string[];
@@ -231,7 +231,7 @@ function AppDeveloperCard() {
         <KV k="Public domains" v={data.publicHosts.join(", ") || "None (private)"} />
         <KV k="Isolation" v={data.isolation.label} mono={false} />
         <KV k="Process ID" v={data.pid ?? "Not running"} />
-        <KV k="Health endpoint" v={data.healthPath ?? "/ (any answer)"} />
+        <KV k="Health monitoring" v={data.health.endpoint ? `${data.health.endpoint.path} (${data.health.endpoint.source})` : data.health.rejection ? `Automatic; ${data.health.rejection.path} rejected` : data.health.candidate ? `Validating ${data.health.candidate.path}` : "Automatic HTTP liveness"} />
         <KV k="Runtime" v={`${data.framework}${data.release?.python ? ` · Python ${data.release.python}` : ""}`} mono={false} />
         <KV k="Current release" v={data.release ? `${data.release.version}${data.release.commit ? ` (${data.release.commit})` : ""}` : "Not deployed"} />
         <KV k="Release folder" v={data.release?.dir} />

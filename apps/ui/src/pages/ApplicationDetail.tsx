@@ -30,7 +30,7 @@ import {
 import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { formatBytes } from "@nexus/shared/format";
-import type { AccessMode, ActivityItem, AppSummary } from "@nexus/shared/contracts";
+import type { AccessMode, ActivityItem, AppSummary, HealthMonitoring } from "@nexus/shared/contracts";
 import type { FriendlyProblem } from "@nexus/shared/errors";
 import type { Me } from "../App";
 import { PageHead } from "../components/Layout";
@@ -42,7 +42,7 @@ import { useApi, useJob } from "../lib/hooks";
 
 interface AppDetailData extends AppSummary {
   sourceDir: string;
-  analysis: { summary: string; components: { role: string; framework: string; path: string }[]; healthPath: string | null };
+  analysis: { summary: string; components: { role: string; framework: string; path: string }[]; health: HealthMonitoring };
   database: { id: string; name: string } | null;
   publicHosts: string[];
   suggestedDomain?: string | null;
@@ -186,6 +186,8 @@ function BackupsTab({ appId, canBackup, onJob }: { appId: string; canBackup: boo
 function SettingsTab({ app, canConfigure, canAccess, canDelete, reload }: { app: AppDetailData; canConfigure: boolean; canAccess: boolean; canDelete: boolean; reload: () => Promise<void> }) {
   const [access, setAccess] = useState<AccessMode>(app.accessMode);
   const [domain, setDomain] = useState(app.publicHosts[0] ?? app.suggestedDomain ?? "");
+  const [healthMode, setHealthMode] = useState<"automatic" | "custom">(app.analysis.health.mode);
+  const [healthPath, setHealthPath] = useState(app.analysis.health.endpoint?.source === "user" ? app.analysis.health.endpoint.path : "/health");
   const [newName, setNewName] = useState("");
   const [newValue, setNewValue] = useState("");
   const [saving, setSaving] = useState<string | null>(null);
@@ -197,11 +199,20 @@ function SettingsTab({ app, canConfigure, canAccess, canDelete, reload }: { app:
   async function restartNow() { setSaving("restart"); try { await post(`/apps/${app.id}/restart`); await reload(); setNote({ text: `${app.name} restarted with the new settings.`, restart: false }); } catch (e) { setError(e as ApiError); } finally { setSaving(null); } }
   async function saveSetting(name: string, value: string | null) { setSaving(name); try { await put(`/apps/${app.id}/settings/${encodeURIComponent(name)}`, { value }); await reload(); setNewName(""); setNewValue(""); setError(null); setNote(app.status === "stopped" ? { text: `Saved. ${app.name} will use it the next time it starts.`, restart: false } : { text: `Saved. ${app.name} reads its settings when it starts — restart it to use the new value.`, restart: true }); } catch (e) { setError(e as ApiError); } finally { setSaving(null); } }
   async function saveAccess() { setSaving("access"); try { await put(`/apps/${app.id}/access`, { access, domain: access === "private" ? null : domain }); await reload(); setError(null); setNote({ text: access === "private" ? "Saved. The app is now private to this computer." : `Saved. The address ${domain} is being set up (the app doesn't need a restart).`, restart: false }); } catch (e) { setError(e as ApiError); } finally { setSaving(null); } }
+  async function saveHealth() { setSaving("health"); try { await put(`/apps/${app.id}/health`, healthMode === "custom" ? { mode: "custom", path: healthPath } : { mode: "automatic" }); await reload(); setError(null); setNote({ text: "Health monitoring saved. No application restart was needed.", restart: false }); } catch (e) { setError(e as ApiError); } finally { setSaving(null); } }
   return (
     <div className="stack">
       {note && <div className="notice saved-note row" role="status"><Check size={16} /> <span>{note.text}</span>{note.restart && <><span className="spacer" /><button className="btn small primary" disabled={!!saving} onClick={() => void restartNow()}>{saving === "restart" ? <Spinner label="Restarting…" /> : "Restart now"}</button></>}</div>}
       <Card title="External Access" sub="The application itself remains on a private local port">
         <div className="settings-access"><label className="field">Who can access<select className="select" value={access} disabled={!canAccess} onChange={(e) => setAccess(e.target.value as AccessMode)}><option value="private">Private to this computer</option><option value="internet">Public website</option><option value="authorized">Authorized users only</option><option value="api">API access only</option></select></label>{access !== "private" && <label className="field">Domain name<input className="input" value={domain} disabled={!canAccess} onChange={(e) => setDomain(e.target.value)} placeholder="app.example.com" /></label>}<button className="btn primary" disabled={!canAccess || saving === "access" || (access !== "private" && !domain)} onClick={() => void saveAccess()}><Save size={15} /> Save Access</button></div>
+      </Card>
+      <Card title="Health Monitoring" sub="Automatic monitoring validates detected endpoints before trusting them">
+        <div className="settings-access">
+          <label className="field">Monitoring mode<select className="select" value={healthMode} disabled={!canConfigure} onChange={(e) => setHealthMode(e.target.value as "automatic" | "custom")}><option value="automatic">Automatic (recommended)</option><option value="custom">Custom endpoint</option></select></label>
+          {healthMode === "custom" && <label className="field">Endpoint path<input className="input mono" value={healthPath} disabled={!canConfigure} onChange={(e) => setHealthPath(e.target.value)} placeholder="/api/health" /></label>}
+          <button className="btn primary" disabled={!canConfigure || saving === "health" || (healthMode === "custom" && !healthPath.startsWith("/"))} onClick={() => void saveHealth()}><Save size={15} /> Save Monitoring</button>
+        </div>
+        <p className="small muted" style={{ marginTop: 10 }}>{app.analysis.health.endpoint ? `Strict endpoint: ${app.analysis.health.endpoint.path} (${app.analysis.health.endpoint.source === "user" ? "configured by you" : "validated by Nexus"}).` : app.analysis.health.rejection ? `Nexus rejected detected candidate ${app.analysis.health.rejection.path} after ${app.analysis.health.rejection.status === null ? "a failed request" : `HTTP ${app.analysis.health.rejection.status}`} and is using general HTTP monitoring.` : app.analysis.health.candidate ? `Detected candidate ${app.analysis.health.candidate.path} will be validated after startup. Until then, it is not used for restart decisions.` : "Nexus checks that the application responds to HTTP; 404, 401, and 403 responses still prove it is alive."}</p>
       </Card>
       {toImport.length > 0 && (
         <Card title="Settings from your app's .env file" sub={`Found in ${envFile!.files.join(" and ")}. Nexus doesn't copy .env files into the app (they hold passwords) — import them here and they're stored encrypted.`}>

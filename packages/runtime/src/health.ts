@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { formatBytes, formatDuration } from "@nexus/shared";
+import { formatBytes, formatDuration, type HealthMonitoring } from "@nexus/shared";
 import type { AppSupervisor } from "./supervisor";
 import type { ExitInfo } from "./types";
 
@@ -16,9 +16,9 @@ export interface ProbeResult {
 
 export type Prober = (url: string, timeoutMs: number) => Promise<ProbeResult>;
 
-/** The one HTTP-status rule used by startup verification and continuous monitoring. */
-export function healthyHttpStatus(healthPath: string | null, status: number): boolean {
-  return healthPath ? status < 400 : status < 500;
+/** Explicit endpoints report health; general probes only prove that an HTTP server is alive. */
+export function healthyHttpStatus(kind: "health" | "liveness", status: number): boolean {
+  return kind === "health" ? status < 400 : status < 500;
 }
 
 function networkFailure(error: unknown): { failure: Exclude<ProbeFailureKind, "http_error">; error: string } {
@@ -52,8 +52,7 @@ export interface RestartPolicy {
 
 export interface HealthConfig {
   appName: string;
-  /** Explicit health endpoint, or null to probe "/" (any non-5xx answer counts). */
-  healthPath: string | null;
+  health: HealthMonitoring;
   intervalMs?: number;
   timeoutMs?: number;
   /** Consecutive failed probes before restarting. */
@@ -86,6 +85,8 @@ export interface RestartRecord {
 }
 
 export interface HealthDiagnostics {
+  monitoring: HealthMonitoring;
+  candidateValidation: ProbeRecord | null;
   lastSuccessfulProbe: ProbeRecord | null;
   failedProbes: ProbeRecord[];
   lastFailure: HealthFailure | null;
@@ -101,7 +102,7 @@ export interface HealthDiagnostics {
   restartHistory: RestartRecord[];
 }
 
-export type HealthEventKind = "unhealthy" | "restarting" | "recovered" | "gave_up" | "memory_exceeded" | "process_crashed";
+export type HealthEventKind = "health_validated" | "health_candidate_rejected" | "unhealthy" | "restarting" | "recovered" | "gave_up" | "memory_exceeded" | "process_crashed";
 
 export interface HealthEvent {
   kind: HealthEventKind;
@@ -138,6 +139,8 @@ export class HealthMonitor extends EventEmitter<{ event: [HealthEvent]; probe: [
   private restartAttempts: number[] = [];
   private readonly restartHistory: RestartRecord[] = [];
   private readonly failedProbes: ProbeRecord[] = [];
+  private readonly health: HealthMonitoring;
+  private candidateValidation: ProbeRecord | null = null;
   private lastSuccessfulProbe: ProbeRecord | null = null;
   private lastFailure: HealthFailure | null = null;
   private lastMemoryBytes: number | null = null;
@@ -167,6 +170,7 @@ export class HealthMonitor extends EventEmitter<{ event: [HealthEvent]; probe: [
   ) {
     super();
     this.policy = { ...DEFAULT_POLICY, ...cfg.restart };
+    this.health = structuredClone(cfg.health);
     this.onCrash = this.onCrash.bind(this);
   }
 
@@ -182,6 +186,8 @@ export class HealthMonitor extends EventEmitter<{ event: [HealthEvent]; probe: [
   diagnostics(): HealthDiagnostics {
     const startedAt = this.sup.startedAt;
     return {
+      monitoring: structuredClone(this.health),
+      candidateValidation: this.candidateValidation ? { ...this.candidateValidation } : null,
       lastSuccessfulProbe: this.lastSuccessfulProbe ? { ...this.lastSuccessfulProbe } : null,
       failedProbes: this.failedProbes.map((p) => ({ ...p })),
       lastFailure: this.lastFailure ? { ...this.lastFailure } : null,
@@ -228,17 +234,54 @@ export class HealthMonitor extends EventEmitter<{ event: [HealthEvent]; probe: [
   /** One health check round; exposed for tests and "Check now". */
   async check(): Promise<void> {
     if (this.stopped || this.gaveUp || this.sup.status !== "running") return;
-    const url = `http://127.0.0.1:${this.sup.port}${this.cfg.healthPath ?? "/"}`;
     const pid = this.sup.pid;
-    const probePromise = (this.deps.probe ?? httpProber)(url, this.cfg.timeoutMs ?? 5000).catch((e) => ({
-      ok: false,
-      status: null,
-      ms: 0,
-      ...networkFailure(e),
-    }));
+    const target = this.probeTarget();
+    const probePromise = this.probe(target.path);
     const memoryPromise = this.deps.memoryOf && pid ? this.deps.memoryOf(pid).catch(() => null) : Promise.resolve(null);
-    const [raw, memory] = await Promise.all([probePromise, memoryPromise]);
+    let [raw, memory] = await Promise.all([probePromise, memoryPromise]);
     if (memory !== null) this.lastMemoryBytes = memory;
+
+    let path = target.path;
+    let kind: "health" | "liveness" = target.kind;
+    if (target.validation) {
+      const candidateRecord: ProbeRecord = {
+        ...raw,
+        ok: raw.ok && raw.status !== null && healthyHttpStatus("health", raw.status),
+        at: this.now,
+        url: this.url(path),
+      };
+      this.candidateValidation = candidateRecord;
+      if (candidateRecord.ok) {
+        this.health.endpoint = { path, source: "detected", validated: true };
+        this.health.rejection = null;
+        this.emit("event", {
+          kind: "health_validated",
+          appName: this.cfg.appName,
+          message: `Nexus validated ${path} as ${this.cfg.appName}'s health endpoint.`,
+          diagnostics: this.diagnostics(),
+        });
+      } else {
+        // A candidate is only a hypothesis. If the general endpoint answers, runtime reality wins
+        // and this candidate is persisted as rejected instead of triggering a restart loop.
+        const fallback = path === "/" ? raw : await this.probe("/");
+        if (fallback.ok && fallback.status !== null) {
+          const reason = raw.status !== null
+            ? `Detected candidate returned HTTP ${raw.status}; general HTTP monitoring is responding.`
+            : `Detected candidate could not be reached (${raw.failure ?? raw.error ?? "request failed"}); general HTTP monitoring is responding.`;
+          this.health.endpoint = null;
+          this.health.rejection = { path, status: raw.status, reason, at: new Date(this.now).toISOString() };
+          this.emit("event", {
+            kind: "health_candidate_rejected",
+            appName: this.cfg.appName,
+            message: `${this.cfg.appName} is responding. Nexus rejected the detected ${path} candidate and switched to general HTTP monitoring.`,
+            diagnostics: this.diagnostics(),
+          });
+        }
+        raw = fallback;
+        path = "/";
+        kind = "liveness";
+      }
+    }
 
     // The process can exit (or be replaced by an already-scheduled restart) while fetch is in
     // flight. Its socket then looks like ECONNRESET/ECONNREFUSED, but the exit event is the real
@@ -247,9 +290,9 @@ export class HealthMonitor extends EventEmitter<{ event: [HealthEvent]; probe: [
     if (!raw.ok) await new Promise((resolve) => setTimeout(resolve, 10));
     if (this.sup.status !== "running" || this.sup.pid !== pid) return;
 
-    const healthy = raw.ok && raw.status !== null && healthyHttpStatus(this.cfg.healthPath, raw.status);
+    const healthy = raw.ok && raw.status !== null && healthyHttpStatus(kind, raw.status);
     const failure = healthy ? undefined : raw.failure ?? (raw.status !== null ? "http_error" : this.inferProbeFailure(raw.error));
-    const record: ProbeRecord = { ...raw, ok: healthy, ...(failure ? { failure } : {}), at: this.now, url };
+    const record: ProbeRecord = { ...raw, ok: healthy, ...(failure ? { failure } : {}), at: this.now, url: this.url(path) };
     this.lastProbe = { ...record };
     this.emit("probe", this.lastProbe);
     if (healthy) {
@@ -299,6 +342,27 @@ export class HealthMonitor extends EventEmitter<{ event: [HealthEvent]; probe: [
       this.emit("event", { kind: "unhealthy", appName: this.cfg.appName, message: this.failureMessage(f), failure: f, diagnostics: this.diagnostics() });
       this.requestRestart(f);
     }
+  }
+
+  private probeTarget(): { path: string; kind: "health" | "liveness"; validation: boolean } {
+    if (this.health.endpoint) return { path: this.health.endpoint.path, kind: "health", validation: false };
+    const candidate = this.health.candidate;
+    const rejected = candidate && this.health.rejection?.path === candidate.path;
+    if (this.health.mode === "automatic" && candidate && !rejected) return { path: candidate.path, kind: "health", validation: true };
+    return { path: "/", kind: "liveness", validation: false };
+  }
+
+  private url(path: string): string {
+    return `http://127.0.0.1:${this.sup.port}${path}`;
+  }
+
+  private probe(path: string): Promise<ProbeResult> {
+    return (this.deps.probe ?? httpProber)(this.url(path), this.cfg.timeoutMs ?? 5000).catch((e) => ({
+      ok: false,
+      status: null,
+      ms: 0,
+      ...networkFailure(e),
+    }));
   }
 
   private onCrash(exit: ExitInfo): void {
@@ -381,7 +445,10 @@ export class HealthMonitor extends EventEmitter<{ event: [HealthEvent]; probe: [
 
   private formatDiagnostics(summary: string, failure: HealthFailure, d: HealthDiagnostics, logs: ApplicationLogTail, database: string | null): string {
     const lines = [summary, "", `Failure: ${this.failureLabel(failure.kind)}`, `Reason: ${failure.detail}`];
-    lines.push(`Health endpoint: http://127.0.0.1:${this.sup.port}${this.cfg.healthPath ?? "/"}`);
+    lines.push(`Health monitoring: ${d.monitoring.mode === "custom" ? "custom endpoint" : d.monitoring.endpoint ? "validated endpoint" : "automatic HTTP liveness"}`);
+    lines.push(`Health endpoint: ${d.monitoring.endpoint ? `http://127.0.0.1:${this.sup.port}${d.monitoring.endpoint.path} (${d.monitoring.endpoint.source})` : "none; probing / for an HTTP response"}`);
+    if (d.candidateValidation) lines.push(`Detected candidate: ${d.candidateValidation.url} -> ${this.probeDescription(d.candidateValidation)}`);
+    if (d.monitoring.rejection) lines.push(`Candidate rejected: ${d.monitoring.rejection.reason}`);
     lines.push(`Last successful health check: ${d.lastSuccessfulProbe ? `${new Date(d.lastSuccessfulProbe.at).toISOString()} (${d.lastSuccessfulProbe.ms} ms, HTTP ${d.lastSuccessfulProbe.status})` : "none recorded"}`);
     lines.push("Last failed checks:");
     if (!d.failedProbes.length) lines.push("  none (the process exited before an HTTP failure was recorded)");

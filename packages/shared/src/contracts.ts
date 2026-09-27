@@ -22,6 +22,19 @@ export interface ResourcePolicy {
   priority: "low" | "normal" | "high";
 }
 
+export type HealthEndpointSource = "detected" | "user" | "framework";
+
+export interface HealthMonitoring {
+  /** Automatic validates detected candidates; custom trusts the endpoint selected by the user. */
+  mode: "automatic" | "custom";
+  /** Static-analysis suggestion. It is never authoritative by itself. */
+  candidate: { path: string; evidence: string } | null;
+  /** Endpoint allowed to use strict health semantics. Null means general HTTP liveness on "/". */
+  endpoint: { path: string; source: HealthEndpointSource; validated: boolean } | null;
+  /** Runtime evidence explaining why an automatic candidate was demoted. */
+  rejection: { path: string; status: number | null; reason: string; at: string } | null;
+}
+
 export interface AppSummary {
   id: string;
   name: string;

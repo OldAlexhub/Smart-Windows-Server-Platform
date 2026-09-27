@@ -421,23 +421,76 @@ export function detectPort(snap: ProjectSnapshot, a: ProjectAnalysis): void {
 
 const HEALTH_PATHS = ["/health", "/healthz", "/api/health", "/api/healthz", "/status", "/api/status", "/_health", "/livez", "/readyz", "/ping", "/api/ping"];
 
+/** Removes comments while preserving quoted route strings. This prevents docs/comments from becoming routes. */
+function codeWithoutComments(text: string, python: boolean): string {
+  let out = "";
+  let quote = "";
+  let escaped = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]!;
+    const n = text[i + 1];
+    if (quote) {
+      out += c;
+      if (escaped) escaped = false;
+      else if (c === "\\") escaped = true;
+      else if (c === quote) quote = "";
+      continue;
+    }
+    if (c === '"' || c === "'" || (!python && c === "`")) {
+      quote = c;
+      out += c;
+      continue;
+    }
+    if (python && c === "#") {
+      while (i + 1 < text.length && text[i + 1] !== "\n") i++;
+      continue;
+    }
+    if (!python && c === "/" && n === "/") {
+      while (i + 1 < text.length && text[i + 1] !== "\n") i++;
+      continue;
+    }
+    if (!python && c === "/" && n === "*") {
+      i += 2;
+      while (i < text.length && !(text[i] === "*" && text[i + 1] === "/")) i++;
+      i++;
+      continue;
+    }
+    out += c;
+  }
+  return out;
+}
+
 export function detectHealth(snap: ProjectSnapshot, a: ProjectAnalysis): void {
   const main = a.components.find((c) => c.role === "backend" || c.role === "fullstack");
   if (!main) return;
-  const found = new Set<string>();
+  const found = new Map<string, string>();
   for (const f of snap.sources(main.path)) {
-    const t = snap.read(f);
-    if (!t) continue;
-    for (const m of t.matchAll(/(?:\.(?:get|route|all)|@\w+\.(?:get|route|api_route))\(\s*["'`](\/[\w/-]*)["'`]/g)) {
-      if (HEALTH_PATHS.includes(m[1]!)) found.add(m[1]!);
+    const raw = snap.read(f);
+    if (!raw) continue;
+    const t = codeWithoutComments(raw, f.endsWith(".py"));
+    const patterns = f.endsWith(".py")
+      ? [/@(?:app|router|bp|blueprint)\.(?:get|route|api_route)\(\s*["'](\/[\w/-]*)["']/g]
+      : [
+          /\b(?:app|router|server|fastify)\s*\.\s*(?:get|all)\(\s*["'`](\/[\w/-]*)["'`]/g,
+          /\b(?:app|router)\s*\.\s*route\(\s*["'`](\/[\w/-]*)["'`]/g,
+          /@Get\(\s*["'`](\/[\w/-]*)["'`]\s*\)/g,
+        ];
+    for (const re of patterns) for (const m of t.matchAll(re)) {
+      if (HEALTH_PATHS.includes(m[1]!) && !found.has(m[1]!)) found.set(m[1]!, `${main.framework} route in ${f}`);
     }
     // Next.js app router: app/api/health/route.ts
   }
   for (const f of snap.list(main.path, /(^|\/)(app|pages)\/api\/(health|healthz|status)(\/route)?\.(t|j)sx?$/)) {
     const m = f.match(/\/api\/(health|healthz|status)/);
-    if (m) found.add(`/api/${m[1]}`);
+    if (m) found.set(`/api/${m[1]}`, `Next.js route file ${f}`);
   }
-  a.healthPath = HEALTH_PATHS.find((p) => found.has(p)) ?? null;
+  const path = HEALTH_PATHS.find((p) => found.has(p)) ?? null;
+  a.health = {
+    mode: "automatic",
+    candidate: path ? { path, evidence: found.get(path)! } : null,
+    endpoint: null,
+    rejection: null,
+  };
 }
 
 // =====================================================================================
@@ -511,4 +564,3 @@ function guessTool(deps: Set<string>): MigrationInfo["tool"] {
 
 /** Built-in detectors in dependency order (database needs env; migrations need database). */
 export const BUILTIN_SIGNAL_DETECTORS = [detectEnv, detectDatabase, detectStorage, detectPort, detectHealth, detectMigrations];
-
