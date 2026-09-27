@@ -1,6 +1,7 @@
 export * from "./types";
 export * from "./env";
 export * from "./resolve";
+export * from "./r-packages";
 export * from "./process-provider";
 export * from "./supervisor";
 export * from "./registry";

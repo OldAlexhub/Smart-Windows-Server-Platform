@@ -1,54 +1,16 @@
-import { execFile } from "node:child_process";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { findRInstalls, type RInstall } from "@nexus/deployment";
 import { StepError } from "../errors";
 
-export interface RInstall {
-  /** "4.5.2" */
-  version: string;
-  home: string;
-  rscript: string;
-}
-
-const cmp = (a: string, b: string) => {
-  const pa = a.split(".").map(Number);
-  const pb = b.split(".").map(Number);
-  for (let i = 0; i < 3; i++) if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) - (pb[i] ?? 0);
-  return 0;
-};
-
-function registryInstalls(): Promise<RInstall[]> {
-  if (process.platform !== "win32") return Promise.resolve([]);
-  return new Promise((resolve) => {
-    const script = "foreach ($h in 'HKLM:\\SOFTWARE\\R-core\\R','HKCU:\\SOFTWARE\\R-core\\R') { Get-ChildItem $h -ErrorAction SilentlyContinue | ForEach-Object { '{0}|{1}' -f $_.PSChildName, (Get-ItemProperty $_.PSPath).InstallPath } }";
-    execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { windowsHide: true, timeout: 20_000 }, (_err, stdout) => {
-      const found: RInstall[] = [];
-      for (const line of String(stdout ?? "").split(/\r?\n/)) {
-        const [version, home] = line.trim().split("|");
-        if (version && home && /^\d+\.\d+\.\d+$/.test(version)) found.push({ version, home, rscript: join(home, "bin", "Rscript.exe") });
-      }
-      resolve(found);
-    });
-  });
-}
+export type { RInstall };
 
 /** Finds installed R versions (Windows registry, then Program Files\R). */
 export class RLocator {
   constructor(private readonly extraRoots: string[] = []) {}
 
   async list(): Promise<RInstall[]> {
-    const found = await registryInstalls();
-    for (const root of [join(process.env.ProgramFiles ?? "C:\\Program Files", "R"), ...this.extraRoots]) {
-      if (!existsSync(root)) continue;
-      for (const d of readdirSync(root)) {
-        const m = d.match(/^R-(\d+\.\d+\.\d+)$/);
-        if (m) found.push({ version: m[1]!, home: join(root, d), rscript: join(root, d, "bin", "Rscript.exe") });
-      }
-    }
-    const seen = new Set<string>();
-    return found
-      .filter((f) => existsSync(f.rscript) && !seen.has(f.home.toLowerCase()) && seen.add(f.home.toLowerCase()))
-      .sort((a, b) => cmp(b.version, a.version));
+    return findRInstalls({ extraRoots: this.extraRoots });
   }
 
   /** The newest R, or the newest matching a requested version ("4.4" or "4.4.1"). */

@@ -4,7 +4,7 @@ export type ComponentRole = "backend" | "frontend" | "fullstack" | "static";
 
 /** How to run a command inside the app's release directory. `{PORT}` is substituted at runtime. */
 export interface CommandSpec {
-  /** Logical executable: "node", "npm", "python", "pip" — resolved to managed runtimes at deploy time. */
+  /** Logical executable: "node", "npm", "python", "pip", "Rscript", "r-packages" — resolved to managed runtimes at deploy time. */
   command: string;
   args: string[];
   /** Extra environment for this command (e.g. PYTHONPATH for src layouts). */
@@ -16,9 +16,9 @@ export interface ComponentAnalysis {
   /** Relative path from the project root ("" for root). */
   path: string;
   runtime: RuntimeKind;
-  language: "javascript" | "typescript" | "python" | "html";
+  language: "javascript" | "typescript" | "python" | "r" | "html";
   framework: string; // "Express", "FastAPI", "React", "Next.js", "Static site"...
-  packageManager: "npm" | "yarn" | "pnpm" | "pip" | "poetry" | "uv" | "pipenv" | null;
+  packageManager: "npm" | "yarn" | "pnpm" | "pip" | "poetry" | "uv" | "pipenv" | "renv" | "cran" | null;
   install: CommandSpec | null;
   build: CommandSpec | null;
   start: CommandSpec | null;

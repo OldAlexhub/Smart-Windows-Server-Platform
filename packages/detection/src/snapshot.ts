@@ -24,9 +24,12 @@ const IGNORED_DIRS = new Set([
   "vendor",
   ".turbo",
   ".cache",
+  "renv",
+  "rsconnect",
+  ".Rproj.user",
 ]);
 
-const TEXT_EXT = /\.(js|mjs|cjs|jsx|ts|tsx|mts|cts|py|json|toml|cfg|ini|txt|yml|yaml|env|example|sample|template|html|sql|prisma|md)$/i;
+const TEXT_EXT = /\.(js|mjs|cjs|jsx|ts|tsx|mts|cts|py|json|toml|cfg|ini|txt|yml|yaml|env|example|sample|template|html|sql|prisma|md|r|rmd|lock)$/i;
 const MAX_FILES = 4000;
 const MAX_FILE_BYTES = 512 * 1024;
 

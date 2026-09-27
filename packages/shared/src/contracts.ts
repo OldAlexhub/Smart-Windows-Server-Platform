@@ -14,7 +14,7 @@ export type AccessMode =
   | "authorized" // HTTPS, requires a Nexus login
   | "api"; // HTTPS, requires an API key
 
-export type RuntimeKind = "node" | "python" | "static";
+export type RuntimeKind = "node" | "python" | "r" | "static";
 
 export interface ResourcePolicy {
   cpuLimitPercent: number | "auto";

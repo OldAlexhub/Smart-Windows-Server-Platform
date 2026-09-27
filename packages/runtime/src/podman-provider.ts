@@ -21,6 +21,7 @@ export function containerName(appId: string): string {
 export function defaultImage(runtime: string, version?: string | null): string {
   const major = version?.match(/(\d+)(?:\.(\d+))?/);
   if (runtime === "python") return `docker.io/library/python:${major ? `${major[1]}.${major[2] ?? "12"}` : "3.12"}-slim`;
+  if (runtime === "r") return `docker.io/rocker/r-ver:${version?.match(/^\d+\.\d+\.\d+$/) ? version : "latest"}`;
   if (runtime === "node") return `docker.io/library/node:${major && Number(major[1]) >= 18 ? major[1] : "22"}-slim`;
   return "docker.io/library/caddy:2-alpine";
 }

@@ -92,6 +92,8 @@ const PY_ENV = [
   /env\(\s*["']([A-Z_][A-Z0-9_]*)["']/g, // django-environ / environs
 ];
 
+const R_ENV = [/Sys\.getenv\(\s*["']([A-Z_][A-Z0-9_]*)["']/g];
+
 export function detectEnv(snap: ProjectSnapshot, a: ProjectAnalysis): void {
   const found = new Map<string, EnvVarRequirement>();
   const add = (name: string, source: string, example: string | null) => {
@@ -127,6 +129,10 @@ export function detectEnv(snap: ProjectSnapshot, a: ProjectAnalysis): void {
         }
       }
     }
+  }
+  for (const f of snap.sources("", /\.r$/i)) {
+    const text = snap.read(f);
+    if (text) for (const re of R_ENV) for (const m of text.matchAll(re)) add(m[1]!, f, null);
   }
   a.env = [...found.values()].sort((x, y) => x.name.localeCompare(y.name));
 }
@@ -171,6 +177,15 @@ const DB_LIBS: Record<string, { kind: DatabaseKind | null; label: string }> = {
   pymongo: { kind: "mongodb", label: "PyMongo" },
   motor: { kind: "mongodb", label: "Motor" },
   pyodbc: { kind: "mssql", label: "pyodbc" },
+  // R
+  RPostgres: { kind: "postgresql", label: "RPostgres" },
+  RPostgreSQL: { kind: "postgresql", label: "RPostgreSQL" },
+  DBI: { kind: null, label: "DBI" },
+  pool: { kind: null, label: "pool" },
+  RMariaDB: { kind: "mysql", label: "RMariaDB" },
+  RMySQL: { kind: "mysql", label: "RMySQL" },
+  RSQLite: { kind: "sqlite", label: "RSQLite" },
+  mongolite: { kind: "mongodb", label: "mongolite" },
 };
 
 function kindFromUrl(url: string | null): DatabaseKind | null {

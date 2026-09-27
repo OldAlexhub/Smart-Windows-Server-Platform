@@ -578,7 +578,7 @@ export class AppManager {
       const resolved = resolveCommand(mig.command.command, mig.command.args, deployments.runtimeFor(release));
       const main = primary(analysis.components)!;
       const cwd = main.path ? join(release.releaseDir, ...main.path.split("/")) : release.releaseDir;
-      const r = await runToCompletion({ executable: resolved.executable, args: resolved.args, cwd, env: { ...env, PATH: [...resolved.pathDirs, env.PATH].join(";") }, onLine: (_s, l) => job.log(l), timeoutMs: 30 * 60_000 });
+      const r = await runToCompletion({ executable: resolved.executable, args: resolved.args, cwd, env: { ...env, ...resolved.env, PATH: [...resolved.pathDirs, env.PATH].join(";") }, onLine: (_s, l) => job.log(l), timeoutMs: 30 * 60_000 });
       if (r.code !== 0) {
         const problem = explainError(r.tail.join("\n"), { appName: app.name, databasePort: this.ctx.postgres?.port ?? null, databaseRunning: true });
         throw new NexusError("infrastructure", "Preparing the database tables failed.", { problem: { ...problem, title: "Database setup step failed" } });
@@ -713,7 +713,7 @@ export class AppManager {
       cwd,
       executable: resolved.executable,
       args: resolved.args,
-      env: { ...env, ...(main.start!.env ?? {}), PATH: [...resolved.pathDirs, env.PATH].join(";") },
+      env: { ...env, ...(main.start!.env ?? {}), ...resolved.env, PATH: [...resolved.pathDirs, env.PATH].join(";") },
       port,
       resources: app.resources,
       startupTimeoutMs: 90_000,
@@ -1153,7 +1153,7 @@ export class AppManager {
       publicHosts: app.publicHosts,
       accessMode: app.accessMode,
       isolation: sup?.isolation ?? { id: "process", label: "Isolated process" },
-      release: release ? { version: release.versionLabel, dir: release.releaseDir, commit: release.sourceCommit, python: release.pythonVersion } : null,
+      release: release ? { version: release.versionLabel, dir: release.releaseDir, commit: release.sourceCommit, python: release.pythonVersion, r: release.rVersion } : null,
       start: sup ? sup.command : main?.start ? { executable: main.start.command, args: main.start.args, cwd: main.path || "." } : null,
       health: app.analysis.health,
       migrations: app.analysis.migrations,

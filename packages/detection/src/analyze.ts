@@ -1,6 +1,7 @@
 import { basename } from "node:path";
 import { analyzeNodeComponent, isOrchestratorPackage, readPackageJson } from "./node";
 import { analyzePythonComponent, parsePyproject } from "./python";
+import { analyzeRComponent } from "./r";
 import { BUILTIN_SIGNAL_DETECTORS } from "./signals";
 import { ProjectSnapshot, joinRel } from "./snapshot";
 import type { ComponentAnalysis, ProjectAnalysis } from "./types";
@@ -12,7 +13,7 @@ export type SignalDetector = (snap: ProjectSnapshot, analysis: ProjectAnalysis) 
 
 const SUBFOLDER_CANDIDATES = ["server", "backend", "api", "client", "frontend", "web", "ui", "app", "site"];
 
-const componentAnalyzers: ComponentAnalyzer[] = [analyzeNodeComponent, analyzePythonComponent, analyzeStaticComponent];
+const componentAnalyzers: ComponentAnalyzer[] = [analyzeNodeComponent, analyzeRComponent, analyzePythonComponent, analyzeStaticComponent];
 const signalDetectors: SignalDetector[] = [...BUILTIN_SIGNAL_DETECTORS];
 
 /** Extension point: plugins can teach Nexus new frameworks and languages. */
@@ -123,7 +124,7 @@ export function primary(components: ComponentAnalysis[]): ComponentAnalysis | un
   );
 }
 
-const RUNTIME_LABEL = { node: "Node.js", python: "Python", static: "" } as const;
+const RUNTIME_LABEL = { node: "Node.js", python: "Python", r: "R", static: "" } as const;
 
 export function describeComponent(c: ComponentAnalysis): string {
   const rt = RUNTIME_LABEL[c.runtime];
