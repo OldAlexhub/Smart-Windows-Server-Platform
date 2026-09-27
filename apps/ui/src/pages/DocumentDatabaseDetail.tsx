@@ -17,7 +17,57 @@ type Doc = Record<string, unknown> & { _id?: unknown };
 interface DocumentPage { documents: Doc[]; total: number; skip: number; limit: number }
 interface TypeCounts { ids: number; references: number; dates: number }
 interface TypeIssues extends TypeCounts { documents: number; scanned: number }
-interface ImportResult { inserted: number; skipped: number; errors: string[]; restored?: TypeCounts }
+interface BsonTypeCounts { objectIds: number; objectIdReferences: number; dates: number; decimal128: number }
+interface ImportResult {
+  inserted: number;
+  skipped: number;
+  errors: string[];
+  errorCount: number;
+  restored?: TypeCounts;
+  detected: { format: "mongodb_extended_json" | "json"; documents: number; types: BsonTypeCounts };
+  preserved: BsonTypeCounts;
+}
+
+function inspectExtendedJson(text: string): { documents: number; types: BsonTypeCounts } | null {
+  try {
+    const trimmed = text.replace(/^\uFEFF/, "").trim();
+    let values: unknown[];
+    try {
+      const parsed = JSON.parse(trimmed) as unknown;
+      values = Array.isArray(parsed) ? parsed : [parsed];
+    } catch {
+      values = trimmed.split(/\r?\n/).filter((line) => line.trim()).map((line) => JSON.parse(line) as unknown);
+    }
+    if (values.some((v) => !v || typeof v !== "object" || Array.isArray(v))) return null;
+    const types: BsonTypeCounts = { objectIds: 0, objectIdReferences: 0, dates: 0, decimal128: 0 };
+    const walk = (value: unknown, key: string): void => {
+      if (!value || typeof value !== "object") return;
+      if (Array.isArray(value)) return value.forEach((v) => walk(v, key));
+      const obj = value as Record<string, unknown>;
+      if (typeof obj.$oid === "string" && Object.keys(obj).length === 1) {
+        if (key === "_id") types.objectIds++;
+        else types.objectIdReferences++;
+        return;
+      }
+      if ("$date" in obj && Object.keys(obj).length === 1) { types.dates++; return; }
+      if (typeof obj.$numberDecimal === "string" && Object.keys(obj).length === 1) { types.decimal128++; return; }
+      Object.entries(obj).forEach(([k, v]) => walk(v, k));
+    };
+    values.forEach((v) => walk(v, ""));
+    return { documents: values.length, types };
+  } catch {
+    return null;
+  }
+}
+
+function bsonParts(t: BsonTypeCounts): string {
+  return [
+    t.objectIds ? `${t.objectIds.toLocaleString()} document ObjectId${t.objectIds === 1 ? "" : "s"}` : "",
+    t.objectIdReferences ? `${t.objectIdReferences.toLocaleString()} ObjectId reference${t.objectIdReferences === 1 ? "" : "s"}` : "",
+    t.dates ? `${t.dates.toLocaleString()} date${t.dates === 1 ? "" : "s"}` : "",
+    t.decimal128 ? `${t.decimal128.toLocaleString()} Decimal128 value${t.decimal128 === 1 ? "" : "s"}` : "",
+  ].filter(Boolean).join(", ");
+}
 
 /** "3 ids, 12 links to other documents and 40 dates" — only the parts that aren't zero. */
 function typeParts(t: TypeCounts): string {
@@ -79,6 +129,7 @@ function JsonEditor({ title, initial, saveLabel, onSave, onClose }: { title: str
 
 function ImportDialog({ collection, endpoint, onDone, onClose }: { collection: string; endpoint: string; onDone: () => void; onClose: () => void }) {
   const [file, setFile] = useState<File | null>(null);
+  const [inspection, setInspection] = useState<ReturnType<typeof inspectExtendedJson>>(null);
   const [error, setError] = useState<ApiError | null>(null);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<ImportResult | null>(null);
@@ -86,7 +137,9 @@ function ImportDialog({ collection, endpoint, onDone, onClose }: { collection: s
     if (!file) return;
     setBusy(true);
     try {
-      const r = await post<ImportResult>(endpoint, { content: await file.text() });
+      const form = new FormData();
+      form.append("file", file);
+      const r = await post<ImportResult>(endpoint, form);
       setResult(r);
       onDone();
     } catch (e) {
@@ -99,16 +152,30 @@ function ImportDialog({ collection, endpoint, onDone, onClose }: { collection: s
     <Modal title={`Import into ${collection}`} onClose={onClose} footer={result ? <button className="btn primary" onClick={onClose}>Done</button> : <><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" disabled={!file || busy} onClick={() => void run()}>{busy ? <Spinner label="Importing…" /> : "Import"}</button></>}>
       {result ? (
         <div>
+          {result.detected.format === "mongodb_extended_json" && <p><strong>Detected MongoDB Extended JSON.</strong></p>}
           <p><strong>{result.inserted.toLocaleString()}</strong> {result.inserted === 1 ? "document" : "documents"} added.</p>
+          {bsonParts(result.preserved) && <ul className="small secondary" style={{ marginTop: 8 }}>
+            {result.preserved.objectIds > 0 && <li>✓ Document ObjectIds preserved ({result.preserved.objectIds.toLocaleString()})</li>}
+            {result.preserved.objectIdReferences > 0 && <li>✓ ObjectId references preserved ({result.preserved.objectIdReferences.toLocaleString()})</li>}
+            {result.preserved.dates > 0 && <li>✓ Dates preserved ({result.preserved.dates.toLocaleString()})</li>}
+            {result.preserved.decimal128 > 0 && <li>✓ Decimal128 values preserved exactly ({result.preserved.decimal128.toLocaleString()})</li>}
+          </ul>}
           {result.restored && typeParts(result.restored) && <p className="secondary">Types restored: {typeParts(result.restored)} were text in the file and are now real ObjectIds and dates, so your app works with them as before.</p>}
           {result.skipped > 0 && <p className="secondary">{result.skipped.toLocaleString()} already existed (same _id) and were left unchanged.</p>}
           {result.errors.length > 0 && <ul className="small secondary">{result.errors.map((e, i) => <li key={i}>{e}</li>)}</ul>}
+          {result.errorCount > result.errors.length && <p className="small secondary">{(result.errorCount - result.errors.length).toLocaleString()} additional document errors were omitted from this summary.</p>}
         </div>
       ) : (
         <>
           <p className="secondary">Choose a <strong>.json</strong> file: an array of documents (as exported by Nexus or mongoexport), or one document per line. Documents that already exist are skipped, so importing twice is safe. Ids and dates saved as text are turned back into ObjectIds and dates automatically.</p>
           <p className="small muted" style={{ marginTop: 8 }}>Moving a whole database from MongoDB Atlas or another server? Use <strong>Copy from MongoDB</strong> at the top of this page instead — it keeps every type exactly.</p>
-          <label className="field" style={{ marginTop: 14 }}>File<input className="input" type="file" accept=".json,.jsonl,.ndjson,application/json" onChange={(e) => setFile(e.target.files?.[0] ?? null)} /></label>
+          <label className="field" style={{ marginTop: 14 }}>File<input className="input" type="file" accept=".json,.jsonl,.ndjson,application/json" onChange={(e) => {
+            const next = e.target.files?.[0] ?? null;
+            setFile(next);
+            setInspection(null);
+            if (next) void next.text().then((text) => setInspection(inspectExtendedJson(text)));
+          }} /></label>
+          {inspection && bsonParts(inspection.types) && <div className="notice small" style={{ marginTop: 10 }}><strong>Detected MongoDB Extended JSON</strong><br />{inspection.documents.toLocaleString()} documents · {bsonParts(inspection.types)}</div>}
           <ErrorNote error={error} />
         </>
       )}

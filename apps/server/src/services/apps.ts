@@ -9,7 +9,7 @@ import { sourceChangesSince, type DeploymentRecord } from "@nexus/deployment";
 import { explainError } from "@nexus/logs";
 import type { GatewaySite } from "@nexus/network";
 import { checkHttps, normalizeDomain } from "@nexus/network";
-import { AppSupervisor, buildIsolatedEnv, HealthMonitor, killTree, resolveCommand, runToCompletion, substituteArgs, type AppProcessConfig } from "@nexus/runtime";
+import { AppSupervisor, buildIsolatedEnv, HealthMonitor, healthyHttpStatus, killTree, resolveCommand, runToCompletion, substituteArgs, type AppProcessConfig } from "@nexus/runtime";
 
 import { DEFAULT_APP_SCOPES } from "@nexus/security";
 import {
@@ -730,7 +730,7 @@ export class AppManager {
     while (Date.now() < deadline) {
       try {
         const r = await fetch(`http://127.0.0.1:${port}${healthPath ?? "/"}`, { redirect: "manual", signal: AbortSignal.timeout(5_000) });
-        if (r.status < 500) return true;
+        if (healthyHttpStatus(healthPath, r.status)) return true;
       } catch {
         // not answering yet
       }
@@ -741,21 +741,75 @@ export class AppManager {
 
   private watch(appId: string, sup: AppSupervisor): void {
     const app = this.require(appId);
+    // Automatic restarts create a new PID without going through startRelease(). Keep the persisted
+    // ownership record accurate so orphan cleanup never refers to an earlier process.
+    sup.on("status", (status) => {
+      if (this.supervisors.get(appId) !== sup) return;
+      if (status === "running") this.recordProcess(appId, sup);
+      else if (status === "crashed") this.ctx.store.run("DELETE FROM app_processes WHERE app_id = ?", [appId]);
+    });
     const monitor = new HealthMonitor(
       sup,
       { appName: app.name, healthPath: app.analysis.healthPath, memoryLimitBytes: app.resources.memoryLimitMb === "auto" ? null : app.resources.memoryLimitMb * 1024 * 1024 },
       {
         memoryOf: (pid) => this.ctx.monitoring?.memoryOf(pid) ?? Promise.resolve(null),
-        explain: () => this.ctx.logs.search(`app:${appId}`, { level: "error", limit: 1 })[0]?.message.split("\n")[0] ?? null,
+        logs: () => {
+          const entries = this.ctx.logs.tail(`app:${appId}`, 80);
+          const lines = (stream: "stdout" | "stderr" | "system") => entries.filter((x) => x.stream === stream).slice(-10).map((x) => `[${x.t}] ${x.message}`);
+          return { stdout: lines("stdout"), stderr: lines("stderr"), system: lines("system") };
+        },
+        database: async () => {
+          if (app.databaseId && this.ctx.databases) {
+            const r = await this.ctx.databases.testConnection(this.ctx.databases.connectionInfo(app.databaseId, appId));
+            return r.ok ? "PostgreSQL connected" : `PostgreSQL failed: ${r.error}`;
+          }
+          if (app.documentDatabaseId && this.ctx.documents) {
+            const r = await this.ctx.documents.testConnection(this.ctx.documents.connectionInfo(app.documentDatabaseId, appId));
+            return r.ok ? "MongoDB/FerretDB connected" : `MongoDB/FerretDB failed: ${r.error}`;
+          }
+          return "no database configured";
+        },
       },
     );
     monitor.on("event", (e) => {
       const kind = e.kind === "recovered" ? "success" : e.kind === "gave_up" ? "problem" : "warning";
       this.ctx.activity.add(kind, e.message, appId);
       if (e.kind === "gave_up") {
-        const tail = this.ctx.logs.search(`app:${appId}`, { level: "error", limit: 3 }).map((x) => x.message).join("\n");
+        const titles = {
+          process_crashed: `${app.name} repeatedly crashed`,
+          http_timeout: `${app.name} stopped answering health checks`,
+          http_error: `${app.name}'s health endpoint reported an error`,
+          connection_refused: `${app.name}'s assigned port stopped accepting connections`,
+          connection_reset: `${app.name} reset health-check connections`,
+          network_error: `${app.name}'s health checks could not complete`,
+          resource_exceeded: `${app.name} exceeded its resource limit`,
+        } as const;
+        const d = e.diagnostics;
+        const last = d?.failedProbes.at(-1);
         this.update(appId, {
-          problem: explainError(tail || e.message, { appName: app.name, databasePort: this.ctx.postgres?.port ?? null, databaseRunning: true }),
+          problem: {
+            title: e.failure ? titles[e.failure.kind] : `${app.name} needs attention`,
+            summary: e.message,
+            cause: e.failure?.detail,
+            checks: [
+              {
+                label: "Application process",
+                status: d?.process.running ? "ok" : "failed",
+                detail: d ? `${d.process.running ? "Running" : "Stopped"}${d.process.pid ? ` (PID ${d.process.pid})` : ""}` : "Unknown",
+              },
+              {
+                label: "HTTP health check",
+                status: last ? "failed" : e.failure?.kind === "process_crashed" ? "skipped" : "unknown",
+                detail: last ? (last.status !== null ? `HTTP ${last.status} after ${last.ms} ms` : `${last.failure ?? last.error ?? "Failed"} after ${last.ms} ms`) : undefined,
+              },
+              {
+                label: "Memory limit",
+                status: e.failure?.kind === "resource_exceeded" ? "failed" : "ok",
+                detail: d?.process.memoryBytes === null || d?.process.memoryBytes === undefined ? "Not available" : `${Math.round(d.process.memoryBytes / 1024 / 1024)} MB at the last check`,
+              },
+            ],
+            technical: e.detail ?? e.message,
+          },
         });
       }
     });
@@ -1006,7 +1060,8 @@ export class AppManager {
     if (sup) {
       try {
         const r = await fetch(`http://127.0.0.1:${sup.port}${app.analysis.healthPath ?? "/"}`, { signal: AbortSignal.timeout(10_000), redirect: "manual" });
-        out.push({ label: "Application", ok: r.status < 500, detail: r.status < 500 ? "Online" : `Answered with an error (${r.status})` });
+        const ok = healthyHttpStatus(app.analysis.healthPath, r.status);
+        out.push({ label: "Application", ok, detail: ok ? "Online" : `Health check answered with an error (${r.status})` });
       } catch (e) {
         out.push({ label: "Application", ok: false, detail: "Not answering" });
       }

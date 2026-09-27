@@ -9,6 +9,31 @@ import { copyFromMongo, knownIds, repairTypes, restoreTypes, typeReport, type Co
 
 const { EJSON, ObjectId } = BSON;
 
+export interface BsonTypeCounts {
+  /** ObjectIds used as a document or nested-document _id. */
+  objectIds: number;
+  /** ObjectIds in all other fields, including arrays of references. */
+  objectIdReferences: number;
+  dates: number;
+  decimal128: number;
+}
+
+export interface DocumentImportResult {
+  inserted: number;
+  skipped: number;
+  errors: string[];
+  errorCount: number;
+  convertedIds: number;
+  restored: TypeChanges;
+  detected: {
+    format: "mongodb_extended_json" | "json";
+    documents: number;
+    types: BsonTypeCounts;
+  };
+  /** BSON values recognised before insertion. The database round-trip is covered by engine tests. */
+  preserved: BsonTypeCounts;
+}
+
 export interface DocumentBlueprint {
   collections: {
     name: string;
@@ -65,12 +90,111 @@ function assertCollectionName(name: string): void {
 function assertSafe(value: unknown, depth = 0): void {
   if (depth > 40) throw NexusError.invalid("That filter is nested too deeply.");
   if (Array.isArray(value)) return value.forEach((v) => assertSafe(v, depth + 1));
+  // BSON values are data, not operator documents. In particular, do not walk Decimal128's byte
+  // representation and accidentally reject or rewrite it.
+  if (value instanceof Date || (value && typeof value === "object" && "_bsontype" in value)) return;
   if (value && typeof value === "object" && value.constructor === Object) {
     for (const [k, v] of Object.entries(value)) {
       if (FORBIDDEN_OPERATORS.has(k)) throw NexusError.invalid(`${k} isn't allowed: it would run code on the server.`);
       assertSafe(v, depth + 1);
     }
   }
+}
+
+const noBsonTypes = (): BsonTypeCounts => ({ objectIds: 0, objectIdReferences: 0, dates: 0, decimal128: 0 });
+
+/** Counts semantic BSON values recursively without converting them to JavaScript primitives. */
+export function bsonTypeCounts(documents: Document[]): BsonTypeCounts {
+  const counts = noBsonTypes();
+  const walk = (value: unknown, key: string): void => {
+    if (value instanceof ObjectId) {
+      if (key === "_id") counts.objectIds++;
+      else counts.objectIdReferences++;
+      return;
+    }
+    if (value instanceof Date) {
+      counts.dates++;
+      return;
+    }
+    if (value && typeof value === "object" && (value as { _bsontype?: string })._bsontype === "Decimal128") {
+      counts.decimal128++;
+      return;
+    }
+    if (Array.isArray(value)) return value.forEach((v) => walk(v, key));
+    if (value && typeof value === "object" && !(value as { _bsontype?: string })._bsontype) {
+      for (const [k, v] of Object.entries(value as Document)) walk(v, k);
+    }
+  };
+  documents.forEach((d) => walk(d, ""));
+  return counts;
+}
+
+function parseFailure(error: unknown): string {
+  return String((error as Error)?.message ?? error).replace(/\s+/g, " ").trim().slice(0, 500);
+}
+
+/** MongoDB Extended JSON array, one document, or JSON Lines -> BSON documents with exact types. */
+export function parseImportJson(text: string): Document[] {
+  const trimmed = text.replace(/^\uFEFF/, "").trim();
+  if (!trimmed) throw NexusError.invalid("That file is empty.");
+  if (trimmed.startsWith("[")) {
+    let parsed: unknown;
+    try {
+      // Canonical mode is intentional: $oid, $date and $numberDecimal must remain BSON values.
+      parsed = EJSON.parse(trimmed, { relaxed: false });
+    } catch (e) {
+      throw NexusError.invalid(`That Extended JSON array could not be read: ${parseFailure(e)}`);
+    }
+    if (!Array.isArray(parsed)) throw NexusError.invalid("The top-level value must be an array of documents.");
+    return parsed as Document[];
+  }
+
+  // A single pretty-printed document is valid too. If the whole text is not one document, fall
+  // back to mongoexport's default JSON Lines format and report the exact bad line.
+  try {
+    const one = EJSON.parse(trimmed, { relaxed: false }) as unknown;
+    if (one && typeof one === "object" && !Array.isArray(one)) return [one as Document];
+  } catch {
+    // JSON Lines is tried below.
+  }
+  const documents: Document[] = [];
+  for (const [lineNumber, line] of trimmed.split(/\r?\n/).entries()) {
+    if (!line.trim()) continue;
+    try {
+      documents.push(EJSON.parse(line, { relaxed: false }) as Document);
+    } catch (e) {
+      throw NexusError.invalid(`Line ${lineNumber + 1} is not valid MongoDB Extended JSON: ${parseFailure(e)}`);
+    }
+  }
+  return documents;
+}
+
+interface WriteIssue {
+  index: number | null;
+  code: number | null;
+  message: string;
+}
+
+/** Driver versions expose bulk write errors as an array, map, object, or result method. */
+function bulkWriteIssues(error: unknown): WriteIssue[] {
+  const e = error as {
+    writeErrors?: unknown;
+    result?: { getWriteErrors?: () => unknown[] };
+  };
+  let values: { value: unknown; index: number | null }[] = [];
+  if (Array.isArray(e.writeErrors)) values = e.writeErrors.map((value, index) => ({ value, index }));
+  else if (e.writeErrors instanceof Map) values = [...e.writeErrors.entries()].map(([index, value]) => ({ value, index: Number(index) }));
+  else if (e.writeErrors && typeof e.writeErrors === "object") values = Object.entries(e.writeErrors).map(([index, value]) => ({ value, index: Number(index) }));
+  else if (typeof e.result?.getWriteErrors === "function") values = e.result.getWriteErrors().map((value, index) => ({ value, index }));
+  return values.map(({ value, index }) => {
+    const w = value as { index?: number; code?: number; errmsg?: string; message?: string; err?: { index?: number; code?: number; errmsg?: string; message?: string } };
+    const inner = w.err ?? w;
+    return {
+      index: Number.isInteger(inner.index ?? w.index ?? index) ? Number(inner.index ?? w.index ?? index) : null,
+      code: typeof (inner.code ?? w.code) === "number" ? Number(inner.code ?? w.code) : null,
+      message: String(inner.errmsg ?? inner.message ?? w.errmsg ?? w.message ?? "Could not insert this document."),
+    };
+  });
 }
 
 /** Parses a filter typed by a person, e.g. {"status": "open", "total": {"$gt": 100}}. Extended JSON ({"$oid": …}) works. */
@@ -281,7 +405,7 @@ export class DocumentBrowser {
     await this.inDb(databaseId, (c, dbName) => c.db(dbName).collection(name).drop());
   }
 
-  /** Streams a collection as a JSON array (relaxed Extended JSON, the same format mongoexport --jsonArray uses). */
+  /** Streams canonical Extended JSON so every BSON type can be imported again without loss. */
   async *exportJson(databaseId: string, collection: string, filterText?: string): AsyncGenerator<string> {
     assertCollectionName(collection);
     const filter = parseFilter(filterText);
@@ -291,7 +415,7 @@ export class DocumentBrowser {
       yield "[\n";
       let first = true;
       for await (const d of c.db(db.dbName).collection(collection).find(filter, { sort: { _id: 1 } })) {
-        yield `${first ? "" : ",\n"}${EJSON.stringify(d, { relaxed: true })}`;
+        yield `${first ? "" : ",\n"}${EJSON.stringify(d, { relaxed: false })}`;
         first = false;
       }
       yield "\n]\n";
@@ -304,27 +428,20 @@ export class DocumentBrowser {
    * Imports documents from a JSON array or JSON Lines (one document per line). Existing documents
    * with the same _id are left alone and reported, so importing twice never duplicates.
    */
-  async importJson(databaseId: string, collection: string, text: string): Promise<{ inserted: number; skipped: number; errors: string[]; convertedIds: number; restored: TypeChanges }> {
+  async importJson(databaseId: string, collection: string, text: string): Promise<DocumentImportResult> {
     assertCollectionName(collection);
-    let docs: Document[];
-    const trimmed = text.trim();
-    try {
-      if (trimmed.startsWith("[")) {
-        docs = EJSON.parse(trimmed, { relaxed: true }) as Document[];
-      } else {
-        docs = trimmed
-          .split(/\r?\n/)
-          .filter((l) => l.trim())
-          .map((l) => EJSON.parse(l, { relaxed: true }) as Document);
-      }
-    } catch {
-      throw NexusError.invalid("That file isn't valid JSON. Use a JSON array of documents, or one document per line.");
-    }
+    let docs = parseImportJson(text);
     if (!Array.isArray(docs) || docs.some((d) => !d || typeof d !== "object" || Array.isArray(d))) {
       throw NexusError.invalid("Every entry in the file must be a JSON object (a document).");
     }
     docs.forEach((d) => assertSafe(d));
-    if (!docs.length) return { inserted: 0, skipped: 0, errors: [], convertedIds: 0, restored: { ids: 0, references: 0, dates: 0 } };
+    const parsedTypes = bsonTypeCounts(docs);
+    const detected = {
+      format: Object.values(parsedTypes).some(Boolean) ? "mongodb_extended_json" as const : "json" as const,
+      documents: docs.length,
+      types: parsedTypes,
+    };
+    if (!docs.length) return { inserted: 0, skipped: 0, errors: [], errorCount: 0, convertedIds: 0, restored: { ids: 0, references: 0, dates: 0 }, detected, preserved: parsedTypes };
     return this.inDb(databaseId, async (c, dbName) => {
       // Files saved from an app or API lose MongoDB's types: ids and dates arrive as plain text.
       // Apps look documents up by ObjectId and group by real dates, so those types are put back:
@@ -341,22 +458,47 @@ export class DocumentBrowser {
       let inserted = 0;
       let skipped = 0;
       const errors: string[] = [];
+      let errorCount = 0;
       for (let i = 0; i < docs.length; i += 1000) {
+        const batch = docs.slice(i, i + 1000);
         try {
-          const r = await coll.insertMany(docs.slice(i, i + 1000), { ordered: false });
+          const r = await coll.insertMany(batch, { ordered: false });
           inserted += r.insertedCount;
         } catch (e) {
-          const err = e as { insertedCount?: number; result?: { insertedCount?: number }; writeErrors?: { code?: number; errmsg?: string }[] | { code?: number; errmsg?: string } };
+          const err = e as { insertedCount?: number; result?: { insertedCount?: number } };
           inserted += err.insertedCount ?? err.result?.insertedCount ?? 0;
-          const writeErrors = Array.isArray(err.writeErrors) ? err.writeErrors : err.writeErrors ? [err.writeErrors] : [];
-          if (!writeErrors.length) throw e;
-          for (const w of writeErrors) {
-            if (w.code === 11000) skipped++;
-            else if (errors.length < 10) errors.push(w.errmsg ?? "Could not insert a document.");
+          const issues = bulkWriteIssues(e);
+          if (!issues.length) {
+            const reason = parseFailure(e);
+            throw new NexusError("infrastructure", `The database rejected documents ${i + 1}-${i + batch.length}: ${reason}`, {
+              cause: e,
+              problem: {
+                title: "Document import stopped",
+                summary: `The database could not insert the batch beginning at document ${i + 1}.`,
+                checks: [{ label: "MongoDB Extended JSON", status: "ok", detail: `${docs.length} documents parsed; BSON types preserved before insertion` }, { label: "Database insert", status: "failed", detail: reason }],
+                technical: reason,
+              },
+            });
+          }
+          for (const issue of issues) {
+            if (issue.code === 11000) {
+              skipped++;
+              continue;
+            }
+            errorCount++;
+            if (errors.length < 10) {
+              const absolute = issue.index === null ? null : i + issue.index;
+              const doc = absolute === null ? null : docs[absolute];
+              const id = doc?._id === undefined ? "" : ` (_id ${EJSON.stringify(doc._id, { relaxed: false })})`;
+              errors.push(`${absolute === null ? "A document" : `Document ${absolute + 1}`}${id}: ${issue.message}`);
+            }
           }
         }
       }
-      return { inserted, skipped, errors, convertedIds, restored };
+      // restoreTypes never touches values already represented as BSON. Recount after that pass so
+      // the response describes both native Extended JSON and safe text-to-type restoration.
+      const preserved = bsonTypeCounts(docs);
+      return { inserted, skipped, errors, errorCount, convertedIds, restored, detected, preserved };
     });
   }
 

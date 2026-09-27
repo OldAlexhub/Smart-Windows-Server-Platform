@@ -192,7 +192,20 @@ export const documentRoutes: RouteModule = (app, ctx) => {
     async (req) => {
       const { id, collection } = collectionParams.parse(req.params);
       const { user } = requireDocPermission(ctx, req, id, "app.data.write");
-      const { content, create } = z.object({ content: z.string().min(1), create: z.boolean().optional() }).parse(req.body);
+      let content: string;
+      let create = false;
+      if (String(req.headers["content-type"] ?? "").startsWith("multipart/")) {
+        const part = await req.file({ limits: { files: 1, fileSize: 64 * 1024 * 1024 } });
+        if (!part) throw NexusError.invalid("Choose a MongoDB JSON, JSONL or NDJSON file.");
+        const chunks: Buffer[] = [];
+        for await (const chunk of part.file) chunks.push(Buffer.from(chunk));
+        if (part.file.truncated) throw NexusError.invalid("That JSON file is larger than the 64 MB import limit.");
+        content = Buffer.concat(chunks).toString("utf8");
+      } else {
+        const body = z.object({ content: z.string().min(1), create: z.boolean().optional() }).parse(req.body);
+        content = body.content;
+        create = body.create ?? false;
+      }
       if (create) {
         const existing = await browser().collections(id);
         if (!existing.some((c) => c.name === collection)) await browser().createCollection(id, collection);

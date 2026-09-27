@@ -10,6 +10,10 @@ import {
   ProcessIsolationProvider,
   resolveCommand,
   type HealthEvent,
+  type ExitInfo,
+  type IsolationProvider,
+  type LaunchSpec,
+  type ManagedProcess,
   type Prober,
 } from "@nexus/runtime";
 import { freePort } from "./ports";
@@ -48,6 +52,60 @@ const SERVER = `require("http").createServer((q,s)=>{s.statusCode=q.url==="/heal
 const CRASH_ONCE = `const fs=require("fs");const f="crashed.flag";require("http").createServer((q,s)=>s.end("ok")).listen(+process.env.PORT,"127.0.0.1",()=>{if(!fs.existsSync(f)){fs.writeFileSync(f,"1");setTimeout(()=>process.exit(1),1000)}});`;
 const ALWAYS_CRASH = `require("http").createServer().listen(+process.env.PORT,"127.0.0.1",()=>setTimeout(()=>{console.error("Error: relation \\"drivers\\" does not exist");process.exit(1)},150));`;
 
+let fakePid = 80_000;
+class FakeProcess implements ManagedProcess {
+  readonly pid = fakePid++;
+  readonly startedAt = Date.now();
+  running = true;
+  readonly exited: Promise<ExitInfo>;
+  private finish!: (exit: ExitInfo) => void;
+  constructor() {
+    this.exited = new Promise((resolve) => (this.finish = resolve));
+  }
+  crash(code = 1): void {
+    if (!this.running) return;
+    this.running = false;
+    this.finish({ code, signal: null, requested: false, at: Date.now() });
+  }
+  async stop(): Promise<ExitInfo> {
+    if (this.running) {
+      this.running = false;
+      this.finish({ code: 0, signal: null, requested: true, at: Date.now() });
+    }
+    return this.exited;
+  }
+}
+
+class FakeProvider implements IsolationProvider {
+  readonly id = "fake";
+  readonly label = "Fake process";
+  current: FakeProcess | null = null;
+  available = async () => ({ available: true });
+  async launch(_spec: LaunchSpec): Promise<ManagedProcess> {
+    return (this.current = new FakeProcess());
+  }
+}
+
+async function fakeApp(): Promise<{ sup: AppSupervisor; provider: FakeProvider }> {
+  const provider = new FakeProvider();
+  const sup = new AppSupervisor(
+    {
+      appId: "fake",
+      cwd: ".",
+      executable: "fake",
+      args: [],
+      env: {},
+      port: 43123,
+      resources: { cpuLimitPercent: "auto", memoryLimitMb: "auto", priority: "normal" },
+      listens: false,
+    },
+    provider,
+  );
+  cleanup.push(() => sup.stop());
+  await sup.start();
+  return { sup, provider };
+}
+
 function waitFor(events: HealthEvent[], kind: HealthEvent["kind"], ms = 15_000): Promise<HealthEvent> {
   const deadline = Date.now() + ms;
   return new Promise((resolve, reject) => {
@@ -77,20 +135,25 @@ describe("HealthMonitor", () => {
     expect(await sup.start()).toBe("running");
     const rec = await waitFor(events, "recovered");
     expect(rec.message).toMatch(/TaxiOps is running again\. Service restored after/);
-    expect(events.map((e) => e.kind)).toEqual(["restarting", "recovered"]);
+    expect(events.map((e) => e.kind)).toEqual(["process_crashed", "restarting", "recovered"]);
+    expect(events[0]?.failure?.kind).toBe("process_crashed");
     expect(sup.status).toBe("running");
   });
 
   it("stops a crash loop and explains the underlying problem", async () => {
     const sup = await app(ALWAYS_CRASH);
-    const { events } = monitor(sup, {}, { explain: () => 'relation "drivers" does not exist' });
+    const { events } = monitor(sup, {}, { logs: () => ({ stdout: ["Listening on the assigned port"], stderr: ['Error: relation "drivers" does not exist'] }) });
     await sup.start();
     const gave = await waitFor(events, "gave_up", 20_000);
     expect(gave.message).toMatch(/stopped restarting it/);
     expect(events.filter((e) => e.kind === "restarting")).toHaveLength(3);
+    expect(gave.failure?.kind).toBe("process_crashed");
     await new Promise((r) => setTimeout(r, 300));
     expect(sup.status).toBe("needs_attention");
     expect(sup.detail).toContain('relation "drivers" does not exist');
+    expect(sup.detail).toContain("Listening on the assigned port");
+    expect(gave.detail).toContain("Restart history:");
+    expect(gave.diagnostics?.restartHistory).toHaveLength(3);
   }, 30_000);
 
   it("restarts an app that stops answering health checks", async () => {
@@ -103,6 +166,7 @@ describe("HealthMonitor", () => {
     await m.check();
     await m.check();
     await waitFor(events, "restarting");
+    expect(events.find((e) => e.kind === "unhealthy")?.failure?.kind).toBe("http_timeout");
     fail = false;
     await waitFor(events, "recovered");
     expect(sup.pid).not.toBe(pid);
@@ -134,6 +198,78 @@ describe("HealthMonitor", () => {
     expect(events).toEqual([]);
     await m.check();
     expect((await waitFor(events, "memory_exceeded")).message).toMatch(/500 MB.*100 MB limit/);
+    expect(events.find((e) => e.kind === "memory_exceeded")?.failure?.kind).toBe("resource_exceeded");
     await waitFor(events, "restarting");
+  });
+
+  it("leaves a healthy application running", async () => {
+    const { sup } = await fakeApp();
+    const { m, events } = monitor(sup, {}, { probe: async () => ({ ok: true, status: 200, ms: 2 }) });
+    const pid = sup.pid;
+    await m.check();
+    await m.check();
+    expect(sup.status).toBe("running");
+    expect(sup.pid).toBe(pid);
+    expect(events).toEqual([]);
+    expect(m.diagnostics().lastSuccessfulProbe?.status).toBe(200);
+  });
+
+  it("diagnoses HTTP 5xx separately from transport failures", async () => {
+    const { sup } = await fakeApp();
+    const { m, events } = monitor(sup, { healthPath: "/health", failureThreshold: 1 }, { probe: async () => ({ ok: true, status: 503, ms: 8 }) });
+    await m.check();
+    const failed = events.find((e) => e.kind === "unhealthy");
+    expect(failed?.failure).toMatchObject({ kind: "http_error", detail: "HTTP 503 after 8 ms" });
+    expect(failed?.message).toMatch(/health endpoint returned an error/);
+  });
+
+  it("diagnoses a refused assigned port separately", async () => {
+    const { sup } = await fakeApp();
+    const { m, events } = monitor(sup, { failureThreshold: 1 }, { probe: async () => ({ ok: false, status: null, ms: 4, error: "connect ECONNREFUSED 127.0.0.1", failure: "connection_refused" }) });
+    await m.check();
+    const failed = events.find((e) => e.kind === "unhealthy");
+    expect(failed?.failure?.kind).toBe("connection_refused");
+    expect(failed?.message).toMatch(/nothing is accepting connections/);
+  });
+
+  it("manual restart reset clears give-up state without erasing incident evidence", async () => {
+    const { sup } = await fakeApp();
+    let healthy = false;
+    const { m, events } = monitor(
+      sup,
+      { failureThreshold: 1, restart: { maxRestarts: 0, windowMs: 60_000, backoffMs: [1] } },
+      { probe: async () => healthy ? { ok: true, status: 200, ms: 1 } : { ok: false, status: null, ms: 5_000, error: "timeout", failure: "timeout" } },
+    );
+    await m.check();
+    await waitFor(events, "gave_up");
+    expect(m.isGivingUp).toBe(true);
+    expect(sup.status).toBe("needs_attention");
+    expect(sup.pid).not.toBeNull(); // HTTP evidence is kept alive until the user restarts.
+    m.reset();
+    healthy = true;
+    await sup.restart();
+    await m.check();
+    expect(m.isGivingUp).toBe(false);
+    expect(sup.status).toBe("running");
+    expect(m.diagnostics().failedProbes).toHaveLength(1);
+  });
+
+  it("retains intermittent failure evidence without restarting a recovered app", async () => {
+    const { sup } = await fakeApp();
+    const replies: Awaited<ReturnType<Prober>>[] = [
+      { ok: false, status: null, ms: 5_000, error: "timeout", failure: "timeout" },
+      { ok: true, status: 200, ms: 3 },
+      { ok: false, status: null, ms: 9, error: "ECONNRESET", failure: "connection_reset" },
+      { ok: true, status: 200, ms: 2 },
+    ];
+    const { m, events } = monitor(sup, { failureThreshold: 2 }, { probe: async () => replies.shift()! });
+    await m.check();
+    await m.check();
+    await m.check();
+    await m.check();
+    expect(events.some((e) => e.kind === "restarting")).toBe(false);
+    expect(m.diagnostics().failedProbes.map((p) => p.failure)).toEqual(["timeout", "connection_reset"]);
+    expect(m.diagnostics().lastSuccessfulProbe?.ms).toBe(2);
+    expect(sup.status).toBe("running");
   });
 });

@@ -1,5 +1,5 @@
 import { mkdirSync, writeFileSync } from "node:fs";
-import { ObjectId } from "mongodb";
+import { Decimal128, ObjectId } from "mongodb";
 import http from "node:http";
 import { dirname, join } from "node:path";
 import type { FastifyInstance } from "fastify";
@@ -195,12 +195,85 @@ describe("Document database browser, import/export, backup and restore", () => {
     expect(exported.body).toEqual([expect.objectContaining({ name: "Grace", _id: { $oid: expect.any(String) } })]);
 
     const again = await call("POST", `${base()}/collections/customers/import`, { content: JSON.stringify(exported.body) });
-    expect(again.body).toEqual({ inserted: 0, skipped: 1, errors: [], convertedIds: 0, restored: { ids: 0, references: 0, dates: 0 } });
+    expect(again.body).toMatchObject({ inserted: 0, skipped: 1, errors: [], errorCount: 0, convertedIds: 0, restored: { ids: 0, references: 0, dates: 0 } });
     const lines = ['{"name":"Linus","orders":1}', '{"name":"Margaret","orders":7}', ""].join("\n");
     const fresh = await call("POST", `${base()}/collections/suppliers/import`, { content: lines, create: true });
-    expect(fresh.body).toEqual({ inserted: 2, skipped: 0, errors: [], convertedIds: 0, restored: { ids: 0, references: 0, dates: 0 } });
+    expect(fresh.body).toMatchObject({ inserted: 2, skipped: 0, errors: [], errorCount: 0, convertedIds: 0, restored: { ids: 0, references: 0, dates: 0 } });
     expect((await call("POST", `${base()}/collections/suppliers/import`, { content: "not json" })).status).toBe(400);
   });
+
+  it("imports and exports MongoDB Extended JSON without losing ObjectIds, references, dates or Decimal128", async () => {
+    const docId = apps.require("shop").documentDatabaseId!;
+    const day = "6ab868f3730fb8a4ab16f141";
+    const night = "6ab868f3730fb8a4ab16f13f";
+    const provider = "6ab868f3730fb8a4ab16f143";
+    const plans = JSON.stringify([
+      { _id: { $oid: day }, name: "Day Service", basePay: { $numberDecimal: "25.97" }, contractedHours: { $numberDecimal: "40" } },
+      { _id: { $oid: night }, name: "Night Service", rates: [{ amount: { $numberDecimal: "21.50" } }, { amount: { $numberDecimal: "34.62" } }] },
+    ]);
+    const providers = JSON.stringify([
+      {
+        _id: { $oid: provider },
+        divisionId: { $oid: "6ab868f3730fb8a4ab16f13e" },
+        planId: { $oid: day },
+        liftLease: { amount: { $numberDecimal: "197.50" } },
+        createdAt: { $date: "2026-09-27T00:53:07.956Z" },
+        alternates: [{ planId: { $oid: night }, rate: { $numberDecimal: "34.62" } }],
+        note: null,
+        active: true,
+        visits: 3,
+      },
+    ]);
+
+    // Importing references does not depend on the target collection already existing.
+    const providerResult = await call("POST", `${base()}/collections/providers/import`, { content: providers, create: true });
+    expect(providerResult.body).toMatchObject({
+      inserted: 1,
+      skipped: 0,
+      errorCount: 0,
+      detected: { format: "mongodb_extended_json", documents: 1, types: { objectIds: 1, objectIdReferences: 3, dates: 1, decimal128: 2 } },
+      preserved: { objectIds: 1, objectIdReferences: 3, dates: 1, decimal128: 2 },
+    });
+    const planResult = await call("POST", `${base()}/collections/vdpplans/import`, { content: plans, create: true });
+    expect(planResult.body).toMatchObject({
+      inserted: 2,
+      skipped: 0,
+      errorCount: 0,
+      detected: { format: "mongodb_extended_json", documents: 2, types: { objectIds: 2, objectIdReferences: 0, dates: 0, decimal128: 4 } },
+      preserved: { objectIds: 2, objectIdReferences: 0, dates: 0, decimal128: 4 },
+    });
+
+    const saved = await ctx.documents!.withDatabase(docId, (c) => c.db("shop").collection("providers").findOne({ _id: new ObjectId(provider) }));
+    expect(saved?._id).toEqual(new ObjectId(provider));
+    expect(saved?.planId).toEqual(new ObjectId(day));
+    expect(saved?.divisionId).toEqual(new ObjectId("6ab868f3730fb8a4ab16f13e"));
+    expect(saved?.createdAt).toEqual(new Date("2026-09-27T00:53:07.956Z"));
+    expect(saved?.liftLease.amount).toBeInstanceOf(Decimal128);
+    expect(saved?.liftLease.amount.toString()).toBe("197.50");
+    const byExactDecimal = await ctx.documents!.withDatabase(docId, (c) => c.db("shop").collection("providers").findOne({ "liftLease.amount": Decimal128.fromString("197.50") }));
+    expect(byExactDecimal?._id).toEqual(new ObjectId(provider));
+    expect(saved?.alternates[0].planId).toEqual(new ObjectId(night));
+    expect(saved?.alternates[0].rate.toString()).toBe("34.62");
+    const referenced = await ctx.documents!.withDatabase(docId, (c) => c.db("shop").collection("vdpplans").findOne({ _id: saved!.planId }));
+    expect(referenced?.name).toBe("Day Service");
+    expect(referenced?.basePay.toString()).toBe("25.97");
+    expect(referenced?.contractedHours.toString()).toBe("40");
+    const nightPlan = await ctx.documents!.withDatabase(docId, (c) => c.db("shop").collection("vdpplans").findOne({ _id: new ObjectId(night) }));
+    expect(nightPlan?.rates.map((r: { amount: Decimal128 }) => r.amount.toString())).toEqual(["21.50", "34.62"]);
+
+    const exported = await call<Record<string, unknown>[]>("GET", `${base()}/collections/providers/export.json`);
+    expect(exported.body[0]).toMatchObject({
+      _id: { $oid: provider },
+      planId: { $oid: day },
+      createdAt: { $date: { $numberLong: String(new Date("2026-09-27T00:53:07.956Z").getTime()) } },
+      liftLease: { amount: { $numberDecimal: "197.50" } },
+    });
+
+    await ctx.documents!.withDatabase(docId, async (c) => {
+      await c.db("shop").collection("providers").drop();
+      await c.db("shop").collection("vdpplans").drop();
+    });
+  }, 60_000);
 
   it("text ids that are ObjectIds: imported as ObjectIds, and existing ones can be converted", async () => {
     const id1 = "6a79217f0d6a7ce0393b5b38";

@@ -1,5 +1,5 @@
 import { createServer, Socket, type Server } from "node:net";
-import { deserialize, EJSON, serialize, Long, type Document } from "bson";
+import { Decimal128, deserialize, EJSON, serialize, Long, type Document } from "bson";
 import { aggregate as runPipeline } from "mingo";
 import { silentLogger, type Logger } from "@nexus/shared";
 import type { DocumentEngine } from "./ferretdb";
@@ -72,6 +72,95 @@ function opMsg(body: Document, responseTo: number, requestId: number): Buffer {
   buf.writeUInt8(0, 20); // section kind 0
   buf.set(doc, 21);
   return buf;
+}
+
+/**
+ * FerretDB 1.x terminates its connection when it receives BSON Decimal128. Nexus stores those
+ * values as an unambiguous ordinary subdocument and restores Decimal128 at the wire boundary.
+ * This keeps exact base-10 text/scale and also makes equality filters work, because query values
+ * undergo the same encoding. The marker is deliberately versioned and requires an exact shape.
+ */
+const DECIMAL_MARKER = "__nexus_internal_bson_decimal128_9f36c1e7_v1__";
+
+function mapDecimals(value: unknown, direction: "store" | "restore", changed: { count: number }): unknown {
+  if (direction === "store" && value instanceof Decimal128) {
+    changed.count++;
+    return { [DECIMAL_MARKER]: value.toString() };
+  }
+  if (!value || typeof value !== "object") return value;
+  if (direction === "restore" && value.constructor === Object) {
+    const entries = Object.entries(value as Document);
+    if (entries.length === 1 && entries[0]![0] === DECIMAL_MARKER && typeof entries[0]![1] === "string") {
+      changed.count++;
+      return Decimal128.fromString(entries[0]![1]);
+    }
+  }
+  if ((value as { _bsontype?: string })._bsontype || value instanceof Date) return value;
+  if (Array.isArray(value)) return value.map((v) => mapDecimals(v, direction, changed));
+  const result: Document = {};
+  for (const [key, item] of Object.entries(value as Document)) result[key] = mapDecimals(item, direction, changed);
+  return result;
+}
+
+function decimalDocument(body: Document, direction: "store" | "restore", changed: { count: number }): Document {
+  return mapDecimals(body, direction, changed) as Document;
+}
+
+/** Rewrites every BSON document in an OP_MSG, including kind-1 insert/update sequences. */
+function rewriteDecimals(frame: Frame, direction: "store" | "restore"): { buf: Buffer; count: number } {
+  if (frame.opCode !== OP_MSG) return { buf: frame.buf, count: 0 };
+  const flags = frame.buf.readUInt32LE(HEADER);
+  // Checksummed OP_MSG frames are not negotiated by the bundled driver/server. Never invalidate a
+  // checksum if a future client enables them; pass it through unchanged instead.
+  if (flags & 1) return { buf: frame.buf, count: 0 };
+  const changed = { count: 0 };
+  const sections: Buffer[] = [];
+  let offset = HEADER + 4;
+  while (offset < frame.buf.length) {
+    const kind = frame.buf.readUInt8(offset++);
+    if (kind === 0) {
+      const size = frame.buf.readInt32LE(offset);
+      const body = deserialize(frame.buf.subarray(offset, offset + size), { promoteLongs: false, promoteValues: true });
+      sections.push(Buffer.from([0]), Buffer.from(serialize(decimalDocument(body, direction, changed))));
+      offset += size;
+      continue;
+    }
+    if (kind === 1) {
+      const sectionStart = offset;
+      const size = frame.buf.readInt32LE(sectionStart);
+      const sectionEnd = sectionStart + size;
+      let nameEnd = sectionStart + 4;
+      while (nameEnd < sectionEnd && frame.buf[nameEnd] !== 0) nameEnd++;
+      if (nameEnd >= sectionEnd) throw new Error("Invalid MongoDB document sequence.");
+      const name = frame.buf.subarray(sectionStart + 4, nameEnd + 1);
+      const documents: Buffer[] = [];
+      let docOffset = nameEnd + 1;
+      while (docOffset < sectionEnd) {
+        const docSize = frame.buf.readInt32LE(docOffset);
+        const body = deserialize(frame.buf.subarray(docOffset, docOffset + docSize), { promoteLongs: false, promoteValues: true });
+        documents.push(Buffer.from(serialize(decimalDocument(body, direction, changed))));
+        docOffset += docSize;
+      }
+      const payload = Buffer.concat([name, ...documents]);
+      const header = Buffer.alloc(5);
+      header.writeUInt8(1, 0);
+      header.writeInt32LE(4 + payload.length, 1);
+      sections.push(header, payload);
+      offset = sectionEnd;
+      continue;
+    }
+    throw new Error(`Unsupported MongoDB OP_MSG section ${kind}.`);
+  }
+  if (!changed.count) return { buf: frame.buf, count: 0 };
+  const payload = Buffer.concat(sections);
+  const buf = Buffer.alloc(HEADER + 4 + payload.length);
+  buf.writeInt32LE(buf.length, 0);
+  buf.writeInt32LE(frame.requestId, 4);
+  buf.writeInt32LE(frame.responseTo, 8);
+  buf.writeInt32LE(frame.opCode, 12);
+  buf.writeUInt32LE(flags, 16);
+  payload.copy(buf, 20);
+  return { buf, count: changed.count };
 }
 
 const notImplemented = (reply: Document) => reply.ok !== 1 && (reply.code === 238 || /not implemented/i.test(String(reply.errmsg ?? "")));
@@ -147,13 +236,15 @@ function foreignCollections(pipeline: Document[]): string[] {
 export interface CompatStats {
   emulated: number;
   lastEmulated: { at: string; collection: string; operators: string } | null;
+  decimal128Stored: number;
+  decimal128Restored: number;
 }
 
 /** One listening proxy per document database. */
 export class DocumentCompatProxy {
   private server: Server | null = null;
   private readonly sockets = new Set<Socket>();
-  readonly stats: CompatStats = { emulated: 0, lastEmulated: null };
+  readonly stats: CompatStats = { emulated: 0, lastEmulated: null, decimal128Stored: 0, decimal128Restored: 0 };
 
   constructor(
     private readonly opts: { listenPort: number; upstreamPort: number; logger?: Logger; host?: string },
@@ -205,27 +296,46 @@ export class DocumentCompatProxy {
       new Promise((resolve) => {
         const id = internalId++;
         internal.set(id, resolve);
-        upstream.write(opMsg(body, 0, id));
+        const changed = { count: 0 };
+        const stored = decimalDocument(body, "store", changed);
+        this.stats.decimal128Stored += changed.count;
+        upstream.write(opMsg(stored, 0, id));
       });
 
     const fromClient = framer((f) => {
       const body = f.opCode === OP_MSG ? safeBody(f) : null;
       const emulatable = body ? asEmulatable(body) : null;
       if (emulatable) aggregations.set(f.requestId, emulatable);
-      upstream.write(f.buf);
+      const rewritten = rewriteDecimals(f, "store");
+      this.stats.decimal128Stored += rewritten.count;
+      upstream.write(rewritten.buf);
     });
     const fromUpstream = framer((f) => {
       const mine = internal.get(f.responseTo);
       if (mine) {
         internal.delete(f.responseTo);
-        mine(safeBody(f) ?? { ok: 0, errmsg: "No reply." });
+        const body = safeBody(f);
+        if (!body) mine({ ok: 0, errmsg: "No reply." });
+        else {
+          const changed = { count: 0 };
+          mine(decimalDocument(body, "restore", changed));
+          this.stats.decimal128Restored += changed.count;
+        }
         return;
       }
       const command = aggregations.get(f.responseTo);
-      if (!command) return void client.write(f.buf);
+      if (!command) {
+        const rewritten = rewriteDecimals(f, "restore");
+        this.stats.decimal128Restored += rewritten.count;
+        return void client.write(rewritten.buf);
+      }
       aggregations.delete(f.responseTo);
-      const reply = safeBody(f);
-      if (!reply || !notImplemented(reply)) return void client.write(f.buf);
+      const rawReply = safeBody(f);
+      if (!rawReply || !notImplemented(rawReply)) {
+        const rewritten = rewriteDecimals(f, "restore");
+        this.stats.decimal128Restored += rewritten.count;
+        return void client.write(rewritten.buf);
+      }
       // FerretDB can't run this command: run it here, then answer the driver's request.
       void this.emulate(command, ask)
         .then((result) => client.write(opMsg(result, f.responseTo, internalId++)))
