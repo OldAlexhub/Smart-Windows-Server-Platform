@@ -6,8 +6,10 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   CaddyGateway,
-  checkCertificate,
+  checkHttps,
   detectPublicIp,
+  probeTls,
+  type GatewayRuntime,
   normalizeDomain,
   suggestHostname,
   verifyDns,
@@ -100,8 +102,8 @@ const freePort = () =>
     });
   });
 
-describe.runIf(existsSync(CADDY))("checkCertificate (real gateway)", () => {
-  it("reads the certificate the gateway serves for a hostname", async () => {
+describe.runIf(existsSync(CADDY))("HTTPS status (real gateway)", () => {
+  it("reads the certificate the gateway serves for a hostname, on the gateway's actual port", async () => {
     const dir = mkdtempSync(join(tmpdir(), "nexus-cert-"));
     const appPort = await freePort();
     const app = http.createServer((_q, s) => s.end("ok")).listen(appPort, "127.0.0.1");
@@ -119,15 +121,36 @@ describe.runIf(existsSync(CADDY))("checkCertificate (real gateway)", () => {
         logFile: join(dir, "gw.log"),
         sites: [{ id: "t", name: "T", localHost: "t.nexus.localhost", publicHosts: ["taxiops.example.com"], access: "internet", upstreamPort: appPort, tlsInternal: true }],
       });
-      let cert = await checkCertificate("taxiops.example.com", httpsPort);
-      for (let i = 0; i < 80 && !cert.active; i++) {
+      const runtime: GatewayRuntime = {
+        installed: true,
+        running: true,
+        configuredHttpPort: 80,
+        configuredHttpsPort: 443,
+        activeHttpPort: null,
+        activeHttpsPort: httpsPort,
+        publicExpected: true,
+        fallback: false,
+        automaticHttps: true,
+        internalCertificates: true,
+        listener: { owner: null, ownedByGateway: null },
+        appliedHosts: ["taxiops.example.com"],
+        error: null,
+        problem: null,
+        storageDir: join(dir, "data"),
+        logFile: join(dir, "gw.log"),
+      };
+      let status = await checkHttps({ hostname: "taxiops.example.com", dns: null, gateway: runtime });
+      for (let i = 0; i < 80 && status.state !== "ready"; i++) {
         await new Promise((r) => setTimeout(r, 250));
-        cert = await checkCertificate("taxiops.example.com", httpsPort);
+        status = await checkHttps({ hostname: "taxiops.example.com", dns: null, gateway: runtime });
       }
-      expect(cert.message).toMatch(/HTTPS is active/);
-      expect(cert.active).toBe(true);
-      expect(cert.issuer).toMatch(/Caddy/);
-      expect((await checkCertificate("taxiops.example.com", await freePort())).active).toBe(false);
+      expect(status).toMatchObject({ state: "ready", httpsPort, certificateValid: true });
+      expect(status.certificateIssuer).toMatch(/Caddy/);
+      // Caddy answers TLS alert 80 for a name it has no certificate for — the "HTTPS pending" symptom.
+      const none = await probeTls("not-configured.example.com", httpsPort);
+      expect(none.outcome).toBe("no_certificate");
+      expect(none.error).toMatch(/alert/i);
+      expect((await probeTls("taxiops.example.com", await freePort())).outcome).toBe("refused");
     } finally {
       await gw.stop();
       app.close();

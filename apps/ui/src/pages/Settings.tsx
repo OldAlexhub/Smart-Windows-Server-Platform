@@ -1,11 +1,11 @@
-import { Activity, Check, ChevronRight, CircleUserRound, Clipboard, Cloud, Code2, Cpu, Database, Globe2, HardDrive, KeyRound, Laptop, LockKeyhole, Network, PlugZap, Plus, Save, Server, ShieldCheck, Trash2, TriangleAlert, UserCog, Users, Wifi, X } from "lucide-react";
+import { Activity, Check, ChevronDown, ChevronRight, CircleUserRound, Clipboard, Cloud, Code2, Cpu, Database, Globe2, HardDrive, KeyRound, Laptop, LockKeyhole, Network, PlugZap, Plus, Save, Server, ShieldCheck, Trash2, TriangleAlert, UserCog, Users, Wifi, X } from "lucide-react";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { useLocation, useNavigate } from "react-router";
 import type { HardwareProfile } from "@nexus/shared/contracts";
-import type { FriendlyProblem } from "@nexus/shared/errors";
+import type { FriendlyProblem, RepairAction } from "@nexus/shared/errors";
 import type { Me } from "../App";
 import { PageHead } from "../components/Layout";
-import { Card, ConfirmByName, ErrorNote, Modal, ProblemCard, Spinner, Status } from "../components/ui";
+import { Card, ConfirmByName, ErrorNote, Modal, ProblemCard, Spinner, Status, useRepair } from "../components/ui";
 import { ApiError, del, get, patch, post, put } from "../lib/api";
 import { useApi } from "../lib/hooks";
 import { PluginSettings } from "../components/PluginSettings";
@@ -20,10 +20,11 @@ interface User {
 interface AppSummary { id: string; name: string; status: string }
 interface Provider { id: string; label: string; description: string; kind: "public" | "private"; installed: boolean; configured: boolean; connected: boolean; detail?: string }
 interface DnsCheck { status: "connected" | "pending" | "wrong_target" | "error"; message: string; action: string | null }
-interface CertificateCheck { active: boolean; issuer: string | null; daysLeft: number | null; message: string }
-interface Domain { appId: string; appName: string; hostname: string; dns: DnsCheck | null; certificate: CertificateCheck | null; instruction: string | null }
+type HttpsState = "ready" | "pending" | "dns_problem" | "gateway_problem" | "certificate_problem" | "port_problem" | "unreachable" | "disabled";
+interface HttpsStatus { state: HttpsState; title: string; message: string; likelyCause: string | null; repair: RepairAction | null; technicalDetails: string | null; gatewayRunning: boolean; httpsPort: number | null; configuredHttpsPort: number; usingFallbackPorts: boolean; certificateIssuer: string | null; expiresAt: string | null; nextRetryAt: string | null }
+interface Domain { appId: string; appName: string; hostname: string; dns: DnsCheck | null; https: HttpsStatus; instruction: string | null }
 interface NetworkState {
-  publicIp: string | null; providers: Provider[]; gateway: { available: boolean; running: boolean; error: string | null; problem: FriendlyProblem | null }; baseDomain: string | null; remoteAdmin: { enabled: boolean; publicHost: string | null }; domains: Domain[];
+  publicIp: string | null; providers: Provider[]; gateway: { available: boolean; running: boolean; error: string | null; problem: FriendlyProblem | null; httpsPort: number | null; configuredHttpsPort: number; usingFallbackPorts: boolean }; baseDomain: string | null; remoteAdmin: { enabled: boolean; publicHost: string | null; https: HttpsStatus | null }; domains: Domain[];
 }
 interface AuditEntry { id: number; at: string; actorName: string | null; actorType: string; action: string; targetType: string | null; targetId: string | null; outcome: string }
 interface AuditState { entries: AuditEntry[]; integrity: { intact: boolean; brokenAt: number | null; entries: number } }
@@ -43,6 +44,35 @@ const TAB_INFO: { id: Tab; label: string; icon: typeof Users }[] = [
 function when(value: string | null): string { return value ? new Date(value).toLocaleString() : "Never"; }
 function providerTone(item: Provider): "good" | "warning" | "neutral" { return item.connected ? "good" : item.installed ? "warning" : "neutral"; }
 function providerLabel(item: Provider): string { return item.connected ? "Connected" : item.configured ? "Not connected" : item.installed ? "Available" : "Not installed"; }
+
+const HTTPS_PROBLEM: HttpsState[] = ["dns_problem", "gateway_problem", "certificate_problem", "port_problem", "unreachable"];
+
+/** One public address: DNS, secure gateway and HTTPS, each in plain language; raw errors only under Technical details. */
+function DomainRow({ domain, canManage, onChanged }: { domain: Domain; canManage: boolean; onChanged: () => void }) {
+  const [open, setOpen] = useState(false);
+  const repair = useRepair();
+  const { dns, https } = domain;
+  const problem = HTTPS_PROBLEM.includes(https.state);
+  const gatewayOk = https.gatewayRunning && !https.usingFallbackPorts && https.state !== "port_problem" && https.state !== "gateway_problem";
+  async function retry() { if (https.repair) { await repair.run(https.repair); onChanged(); } }
+  return <div className="domain-item">
+    <div className="domain-row">
+      <span><strong>{domain.hostname}</strong><small>{domain.appName}</small></span>
+      <span><Status tone={dns?.status === "connected" ? "good" : dns?.status === "error" || dns?.status === "wrong_target" ? "critical" : "warning"}>{dns?.status === "connected" ? "DNS connected" : dns?.status === "wrong_target" ? "DNS needs a change" : dns?.status === "error" ? "DNS check failed" : "DNS pending"}</Status><small>{dns?.status === "connected" ? "Domain points to this server." : dns?.message ?? domain.instruction ?? "Waiting for a public address"}</small></span>
+      <span><Status tone={gatewayOk ? "good" : https.gatewayRunning ? "warning" : "critical"}>{gatewayOk ? "Gateway running" : https.gatewayRunning ? "Gateway needs attention" : "Gateway stopped"}</Status><small>{https.gatewayRunning && https.httpsPort ? `Secure gateway is listening on port ${https.httpsPort}.` : "The secure gateway isn't running."}</small></span>
+      <span><Status tone={https.state === "ready" ? "good" : https.state === "disabled" ? "neutral" : problem ? "critical" : "warning"} spinning={https.state === "pending"}>{https.title}</Status><small>{https.message}</small></span>
+    </div>
+    {(problem || https.likelyCause || https.technicalDetails) && <div className="domain-detail">
+      {https.likelyCause && <p><strong>{problem ? "Likely cause: " : "Tip: "}</strong>{https.likelyCause}</p>}
+      <div className="row">
+        {canManage && https.repair && problem && <button className="btn small" disabled={repair.busy} onClick={() => void retry()}>{https.repair.label}</button>}
+        {https.technicalDetails && <button className="btn ghost small" onClick={() => setOpen(!open)} aria-expanded={open}>{open ? <ChevronDown size={14} /> : <ChevronRight size={14} />} Technical details</button>}
+      </div>
+      {repair.result && <Status tone={repair.result.ok ? "good" : "critical"}>{repair.result.message}</Status>}
+      {open && https.technicalDetails && <pre className="domain-technical">{https.technicalDetails}</pre>}
+    </div>}
+  </div>;
+}
 
 function CreateUserModal({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
   const [form, setForm] = useState({ username: "", displayName: "", email: "", role: "viewer" as Exclude<Role, "owner">, password: "" });
@@ -125,7 +155,7 @@ function AccessPanel({ me }: { me: Me }) {
     <Card title="Domains" sub="Use one base domain to create predictable addresses for applications." action={canManage && <button className="btn primary small" disabled={savingDomain} onClick={() => void saveDomain()}><Save size={14} /> Save</button>}>
       <label className="field domain-setting">Base domain <span className="hint">Example: example.com. New applications can use app-name.example.com.</span><input className="input" disabled={!canManage} value={baseDomain ?? data.baseDomain ?? ""} onChange={(e) => { setBaseDomain(e.target.value); setDomainSaved(false); }} placeholder="example.com" /></label>
       {domainSaved && <div className="notice saved-note" role="status"><Check size={16} /> Saved. New applications you publish can use addresses like <strong>app-name.{data.baseDomain}</strong>.</div>}
-      {!data.domains.length ? <div className="settings-empty compact"><Globe2 size={25} /><strong>No public application domains</strong><span>Private applications continue to work at their local addresses.</span></div> : <div className="domain-list">{data.domains.map((domain) => <div className="domain-row" key={`${domain.appId}:${domain.hostname}`}><span><strong>{domain.hostname}</strong><small>{domain.appName}</small></span><span><Status tone={domain.dns?.status === "connected" ? "good" : domain.dns?.status === "error" || domain.dns?.status === "wrong_target" ? "critical" : "warning"}>{domain.dns?.status === "connected" ? "DNS connected" : domain.dns?.status === "wrong_target" ? "DNS needs a change" : domain.dns?.status === "error" ? "DNS check failed" : "DNS pending"}</Status><small>{domain.dns?.message ?? domain.instruction ?? "Waiting for a public address"}</small></span><span><Status tone={domain.certificate?.active ? "good" : "warning"}>{domain.certificate?.active ? "HTTPS active" : "HTTPS pending"}</Status><small>{domain.certificate?.message ?? "Certificate will be automatic"}</small></span></div>)}</div>}
+      {!data.domains.length ? <div className="settings-empty compact"><Globe2 size={25} /><strong>No public application domains</strong><span>Private applications continue to work at their local addresses.</span></div> : <div className="domain-list">{data.domains.map((domain) => <DomainRow key={`${domain.appId}:${domain.hostname}`} domain={domain} canManage={canManage} onChanged={() => void reload()} />)}</div>}
     </Card>
     <Card title="Remote administration" sub="Open this control center from outside the server. Application access is configured separately." action={canManageRemote && <button className="btn small" onClick={() => setRemote({ enabled: data.remoteAdmin.enabled, publicHost: data.remoteAdmin.publicHost ?? "" })}>Configure</button>}><div className="remote-admin-summary"><ShieldCheck size={22} /><span><strong>{data.remoteAdmin.enabled ? `Available at ${data.remoteAdmin.publicHost}` : "Control center is local only"}</strong><small>{data.remoteAdmin.enabled ? "A password and two-step verification are required at every remote sign-in." : "This is the safest default. Published applications can still be reached normally."}</small></span></div></Card>
     <ErrorNote error={actionError} />

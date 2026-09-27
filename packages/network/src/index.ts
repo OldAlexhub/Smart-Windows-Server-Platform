@@ -4,6 +4,7 @@ export * from "./caddy";
 export * from "./firewall";
 export * from "./reachability";
 export * from "./domains";
+export * from "./https-status";
 export * from "./wireguard";
 export * from "./upnp";
 export * from "./relay";

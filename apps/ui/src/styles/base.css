@@ -1264,7 +1264,11 @@ table.sheet tbody tr:hover td { background: var(--accent-soft); }
 .provider-row em { color: var(--text-muted); font-size: 12px; font-style: normal; }
 .domain-setting { max-width: 520px; }
 .domain-list { margin-top: 18px; }
-.domain-row { display: grid; grid-template-columns: minmax(180px, .7fr) minmax(210px, 1.2fr) minmax(180px, .8fr); gap: 18px; padding: 13px 2px; border-top: 1px solid var(--border); }
+.domain-item { border-top: 1px solid var(--border); }
+.domain-row { display: grid; grid-template-columns: minmax(170px, .8fr) minmax(170px, 1fr) minmax(160px, .9fr) minmax(180px, 1.1fr); gap: 18px; padding: 13px 2px; }
+.domain-detail { display: flex; flex-direction: column; gap: 8px; padding: 0 2px 13px; }
+.domain-detail p { margin: 0; color: var(--text-secondary); }
+.domain-technical { margin: 0; padding: 10px 12px; border-radius: 8px; background: var(--surface-sunken); color: var(--text-secondary); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .domain-row > span { display: flex; flex-direction: column; min-width: 0; }
 .domain-row small { color: var(--text-muted); overflow-wrap: anywhere; }
 .remote-admin-summary { display: flex; gap: 12px; align-items: flex-start; }

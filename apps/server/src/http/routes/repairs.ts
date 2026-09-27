@@ -33,6 +33,14 @@ export function repairRoutes(s: NexusServices): RouteModule {
           if (!r.ok) throw new NexusError("infrastructure", r.error ?? "The secure gateway still can't start.");
           return { ok: true, message: s.gateway.problem ? s.gateway.problem.summary : "Secure access is working." };
         }
+        case "certificates.retry": {
+          const u = requirePermission(req, "network.manage");
+          audit(u.id, u.displayName);
+          // Reload even if nothing changed: Caddy then requests certificates now instead of after its backoff.
+          const r = await s.gateway.sync({ force: true });
+          if (!r.ok) throw new NexusError("infrastructure", r.error ?? "The secure gateway still can't start.");
+          return { ok: true, message: "Nexus asked for the certificate again. This can take a minute." };
+        }
         case "database.start": {
           const u = requirePermission(req, "server.settings");
           if (!ctx.postgres) throw NexusError.conflict("The database server isn't installed.");

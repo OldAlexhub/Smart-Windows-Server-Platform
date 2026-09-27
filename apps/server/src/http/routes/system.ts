@@ -7,7 +7,8 @@ import {
   TailscaleProvider,
   normalizeDomain,
   verifyDns,
-  checkCertificate,
+  checkHttps,
+  readGatewayLog,
 } from "@nexus/network";
 import { isRole, ROLES, APP_ROLES, type Role } from "@nexus/security";
 import { BRAND, NexusError, randomToken } from "@nexus/shared";
@@ -277,33 +278,45 @@ export function systemRoutes(deps: {
         new TailscaleProvider().status(),
       ]);
       const direct = new DirectProvider();
-      const domains = [];
-      for (const a of apps.list().filter((x) => x.accessMode !== "private")) {
-        for (const h of a.publicHosts) {
-          const record = direct.dnsRecords([h], { publicIp })[0];
-          const dns = record ? await verifyDns(record) : null;
-          const cert = gateway.available ? await checkCertificate(h, gateway.settings().httpsPort) : null;
-          domains.push({
-            appId: a.id,
-            appName: a.name,
-            hostname: h,
-            dns,
-            certificate: cert,
-            instruction: record?.instruction ?? null,
-          });
-        }
-      }
+      // The gateway's real state (actual ports, running, applied addresses) — never settings.
+      const runtime = await gateway.runtime();
+      const logLines = runtime.automaticHttps ? await readGatewayLog(runtime.logFile) : [];
+      const sites = new Map(apps.gatewaySites().map((x) => [x.id, x]));
+      const check = async (h: string, applicationRunning: boolean | null) => {
+        const record = direct.dnsRecords([h], { publicIp })[0];
+        const dns = record ? await verifyDns(record) : null;
+        const https = await checkHttps({ hostname: h, dns, gateway: runtime, logLines, applicationRunning });
+        return { dns, https, instruction: record?.instruction ?? null };
+      };
+      const domains = await Promise.all(
+        apps
+          .list()
+          .filter((x) => x.accessMode !== "private")
+          .flatMap((a) =>
+            a.publicHosts.map(async (h) => {
+              const site = sites.get(a.id);
+              return { appId: a.id, appName: a.name, hostname: h, ...(await check(h, site ? site.upstreamPort !== null || !!site.static : null)) };
+            }),
+          ),
+      );
       return {
         publicIp,
         providers,
         gateway: {
-          available: gateway.available,
-          running: await gateway.running(),
-          error: gateway.lastError,
-          problem: gateway.problem,
+          available: runtime.installed,
+          running: runtime.running,
+          error: runtime.error,
+          problem: runtime.problem,
+          httpsPort: runtime.activeHttpsPort,
+          configuredHttpsPort: runtime.configuredHttpsPort,
+          usingFallbackPorts: runtime.fallback,
         },
         baseDomain: ctx.settings.get<string | null>(SETTINGS.baseDomain, null),
-        remoteAdmin: { enabled: remoteAdmin.enabled, publicHost: remoteAdmin.publicHost },
+        remoteAdmin: {
+          enabled: remoteAdmin.enabled,
+          publicHost: remoteAdmin.publicHost,
+          https: remoteAdmin.enabled && remoteAdmin.publicHost ? (await check(remoteAdmin.publicHost, true)).https : null,
+        },
         domains,
       };
     });

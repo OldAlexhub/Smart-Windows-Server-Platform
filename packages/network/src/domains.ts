@@ -1,5 +1,4 @@
 import { promises as dnsPromises } from "node:dns";
-import tls from "node:tls";
 import { NexusError } from "@nexus/shared";
 import { isValidHostname } from "./gateway";
 import type { DnsRecord } from "./reachability";
@@ -118,53 +117,4 @@ export async function verifyDns(record: DnsRecord, resolver: Resolver = publicRe
 function isNotFound(e: unknown): boolean {
   const code = (e as { code?: string }).code;
   return code === "ENOTFOUND" || code === "ENODATA" || code === "NXDOMAIN" || code === "ESERVFAIL";
-}
-
-// ------------------------------------------------------------------ certificates
-
-export interface CertificateStatus {
-  active: boolean;
-  issuer: string | null;
-  validTo: string | null;
-  daysLeft: number | null;
-  automatic: boolean;
-  message: string;
-}
-
-/**
- * Reads the certificate the local gateway presents for `hostname` (via SNI on 127.0.0.1),
- * so it works even before public DNS is set up.
- */
-export function checkCertificate(hostname: string, port = 443, host = "127.0.0.1", now = Date.now()): Promise<CertificateStatus> {
-  return new Promise((resolve) => {
-    const socket = tls.connect({ host, port, servername: hostname, rejectUnauthorized: false, timeout: 5000 }, () => {
-      const cert = socket.getPeerCertificate();
-      socket.end();
-      if (!cert || !cert.valid_to) {
-        return resolve({ active: false, issuer: null, validTo: null, daysLeft: null, automatic: true, message: "No certificate yet." });
-      }
-      const validTo = new Date(cert.valid_to);
-      const daysLeft = Math.floor((validTo.getTime() - now) / 86_400_000);
-      const issuer = (cert.issuer?.O as string | undefined) ?? (cert.issuer?.CN as string | undefined) ?? null;
-      const cn = cert.subject?.CN;
-      const names = [...(Array.isArray(cn) ? cn : cn ? [cn] : []), ...(cert.subjectaltname ?? "").split(",").map((s) => s.trim().replace(/^DNS:/, ""))];
-      const matches = names.some((n) => n.toLowerCase() === hostname.toLowerCase());
-      const active = matches && daysLeft >= 0;
-      resolve({
-        active,
-        issuer,
-        validTo: validTo.toISOString(),
-        daysLeft,
-        automatic: true,
-        message: active ? `HTTPS is active. Renews automatically (valid ${daysLeft} more days).` : "The certificate for this address is not ready yet.",
-      });
-    });
-    socket.on("error", (e) =>
-      resolve({ active: false, issuer: null, validTo: null, daysLeft: null, automatic: true, message: `HTTPS isn't available yet (${e.message}).` }),
-    );
-    socket.on("timeout", () => {
-      socket.destroy();
-      resolve({ active: false, issuer: null, validTo: null, daysLeft: null, automatic: true, message: "The secure gateway didn't answer." });
-    });
-  });
 }

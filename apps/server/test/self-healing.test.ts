@@ -62,6 +62,13 @@ describe("gateway port conflicts", () => {
     expect(net_.body.gateway.running).toBe(true);
     expect(net_.body.gateway.problem.title).toBe("Internet access is blocked by another program");
     expect(net_.body.gateway.problem.summary).toMatch(/node/i);
+    // Status reports (and checks) the private port the gateway really moved to, not the configured one.
+    const fallbackHttps = ctx.ports.get("gateway", "https-private");
+    expect(net_.body.gateway).toMatchObject({ httpsPort: fallbackHttps, usingFallbackPorts: true });
+    expect(net_.body.gateway.httpsPort).not.toBe(net_.body.gateway.configuredHttpsPort);
+    expect((await services.gateway.runtime({ inspectListener: false })).activeHttpsPort).toBe(fallbackHttps);
+    const domain = net_.body.domains.find((d: { hostname: string }) => d.hostname === "depot.test.example");
+    expect(domain.https).toMatchObject({ hostname: "depot.test.example", httpsPort: fallbackHttps });
     const dash = await call("GET", "/api/v1/dashboard");
     expect(dash.body.externalAccess.state).toBe("problem");
     // The local address still works through the gateway.
@@ -80,7 +87,9 @@ describe("gateway port conflicts", () => {
     await new Promise((r) => blocker.close(r));
     const r = await call("POST", "/api/v1/repairs", { id: "gateway.retry" });
     expect(r.status).toBe(200);
-    expect((await call("GET", "/api/v1/network")).body.gateway.problem).toBeNull();
+    const after = (await call("GET", "/api/v1/network")).body.gateway;
+    expect(after.problem).toBeNull();
+    expect(after).toMatchObject({ httpsPort: after.configuredHttpsPort, usingFallbackPorts: false });
   }, 60_000);
 });
 

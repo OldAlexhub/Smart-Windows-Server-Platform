@@ -11,7 +11,7 @@ const NAVIGATE_REPAIRS: Record<string, (appId?: string) => string> = {
 };
 
 /** Runs a one-click repair: confirmation when needed, server call, then a short result. */
-function useRepair(appId?: string) {
+export function useRepair(appId?: string) {
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [confirming, setConfirming] = useState<RepairAction | null>(null);

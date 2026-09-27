@@ -45,6 +45,11 @@ export class CaddyGateway implements GatewayProvider {
     return r.code === 0 ? { valid: true } : { valid: false, error: r.out.trim().split("\n").slice(-3).join("\n") };
   }
 
+  /** Process id of the gateway we started, or null (not running, or adopted from an earlier Nexus). */
+  pid(): number | null {
+    return this.adoptedAdmin === null && this.child && this.child.exitCode === null ? (this.child.pid ?? null) : null;
+  }
+
   async running(): Promise<boolean> {
     if (this.adoptedAdmin !== null) return adminAlive(this.adoptedAdmin);
     if (!this.child || this.child.exitCode !== null) return false;
@@ -74,8 +79,12 @@ export class CaddyGateway implements GatewayProvider {
     this.log.info("gateway started", { admin: config.adminPort });
   }
 
-  /** Applies a new configuration without dropping connections. */
-  async apply(config: GatewayConfig): Promise<void> {
+  /**
+   * Applies a new configuration without dropping connections. `force` reloads even an unchanged
+   * configuration, which makes Caddy restart certificate management (a fresh ACME attempt now
+   * instead of waiting for its retry backoff).
+   */
+  async apply(config: GatewayConfig, opts: { force?: boolean } = {}): Promise<void> {
     if (!(await this.running())) return this.start(config);
     this.write(config);
     const r = await exec(this.opts.caddyExe, [
@@ -86,6 +95,7 @@ export class CaddyGateway implements GatewayProvider {
       "caddyfile",
       "--address",
       `127.0.0.1:${config.adminPort}`,
+      ...(opts.force ? ["--force"] : []),
     ]);
     if (r.code !== 0) throw new Error(`The secure gateway rejected the new configuration: ${r.out.trim().split("\n").pop()}`);
   }

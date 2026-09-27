@@ -8,7 +8,7 @@ import { planDatabaseWiring, planDocumentWiring, type ConnectionInfo } from "@ne
 import { sourceChangesSince, type DeploymentRecord } from "@nexus/deployment";
 import { explainError } from "@nexus/logs";
 import type { GatewaySite } from "@nexus/network";
-import { normalizeDomain } from "@nexus/network";
+import { checkHttps, normalizeDomain } from "@nexus/network";
 import { AppSupervisor, buildIsolatedEnv, HealthMonitor, killTree, resolveCommand, runToCompletion, substituteArgs, type AppProcessConfig } from "@nexus/runtime";
 
 import { DEFAULT_APP_SCOPES } from "@nexus/security";
@@ -1032,7 +1032,9 @@ export class AppManager {
     }
     out.push({ label: "Health checks", ok: !!sup || !primary(app.analysis.components)?.start, detail: app.analysis.healthPath ? `Watching ${app.analysis.healthPath}` : "Watching the application" });
     if (app.accessMode !== "private" && app.publicHosts[0]) {
-      out.push({ label: "HTTPS", ok: !this.gateway.lastError, detail: this.gateway.lastError ?? "Configured" });
+      // Right after publishing the certificate is usually still being issued: that is not a failure.
+      const https = await checkHttps({ hostname: app.publicHosts[0], dns: null, gateway: await this.gateway.runtime({ inspectListener: false }) });
+      out.push({ label: "HTTPS", ok: ["ready", "pending", "disabled"].includes(https.state), detail: https.likelyCause ? `${https.message} ${https.likelyCause}` : https.message });
     }
     return out;
   }
