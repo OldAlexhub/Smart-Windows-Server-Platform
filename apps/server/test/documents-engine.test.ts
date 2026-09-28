@@ -14,7 +14,7 @@ describe.runIf(!!componentDir(resolveServicePaths(), "ferretdb"))("document engi
     dispose();
   }, 60_000);
 
-  it("uses a FerretDB build chosen by an administrator instead of the bundled one", async () => {
+  it("keeps an administrator-chosen FerretDB build available for legacy databases", async () => {
     const paths = resolveServicePaths({ ...process.env, NEXUS_HOME: join(home, "service") });
     ctx = await NexusContext.create({ paths, managementPort: 0, keyProtector: new InsecurePlainKeyProtector(), hardwareDetector: new FakeDetector(), portRange: [42900, 42919] });
     const bundled = componentDir(resolveServicePaths(), "ferretdb")!;
@@ -28,9 +28,11 @@ describe.runIf(!!componentDir(resolveServicePaths(), "ferretdb"))("document engi
     ctx.settings.set("documents.ferretdbPath", custom);
     await ctx.startDataServices();
 
-    expect(ctx.documentSource).toEqual({ source: "configured", version: basename(bundled) });
+    expect(ctx.documentEngine).toMatchObject({ version: basename(bundled) });
+    expect(ctx.documentSource).toEqual({ engine: "MongoDB", source: "bundled", version: expect.any(String), transactions: true });
     const docs = await ctx.startDocuments();
-    const { connection } = await docs.createDatabase({ displayName: "Inventory", appId: "inv" });
+    const { database, connection } = await docs.createDatabase({ displayName: "Inventory", appId: "inv", provider: "ferretdb" });
+    expect(database).toMatchObject({ provider: "ferretdb", transactions: false });
     expect(await docs.testConnection(connection!)).toEqual({ ok: true });
   }, 120_000);
 

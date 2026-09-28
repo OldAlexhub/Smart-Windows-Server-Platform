@@ -23,7 +23,7 @@ function DatabaseCard({ db }: { db: DatabaseSummary }) {
       </div>
       <h2>{db.name}</h2>
       <p className="small muted">
-        <span className="engine-label">{documents ? "Documents · MongoDB-compatible" : "Tables · PostgreSQL"}</span> <span className="mono">{db.dbName}</span>
+        <span className="engine-label">{documents ? (db.documentProvider === "mongodb" ? "Documents · MongoDB replica set" : "Documents · MongoDB-compatible (legacy)") : "Tables · PostgreSQL"}</span> <span className="mono">{db.dbName}</span>
       </p>
       <div className="database-stats">
         <span>{documents ? <FileJson size={15} /> : <Table2 size={15} />}<strong>{db.tableCount}</strong><small>{documents ? "Collections" : "Tables"}</small></span>
@@ -43,7 +43,7 @@ function DatabaseCard({ db }: { db: DatabaseSummary }) {
 export function Databases({ canCreate }: { canCreate: boolean }) {
   const navigate = useNavigate();
   const { data, error, loading } = useApi<DatabaseSummary[]>("/databases", 15_000);
-  const { data: engine } = useApi<{ available: boolean }>(canCreate ? "/documents/engine" : null);
+  const { data: engine } = useApi<{ available: boolean; engine?: string; transactions?: boolean }>(canCreate ? "/documents/engine" : null);
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
   const [kind, setKind] = useState<Kind>("postgresql");
@@ -83,7 +83,7 @@ export function Databases({ canCreate }: { canCreate: boolean }) {
               </button>
               <button type="button" role="radio" aria-checked={kind === "mongodb"} className={`choice wizard-choice ${kind === "mongodb" ? "selected" : ""}`} onClick={() => setKind("mongodb")}>
                 <span className="radio-dot">{kind === "mongodb" && <span />}</span>
-                <span className="choice-copy"><span className="title">Documents</span><span className="desc">Flexible JSON-like records, MongoDB-compatible — for apps built with Mongoose, PyMongo or the MongoDB driver.</span></span>
+                <span className="choice-copy"><span className="title">Documents</span><span className="desc">Flexible BSON documents in an isolated MongoDB replica set{engine.transactions ? ", with transaction support" : ""} — for Mongoose, PyMongo and MongoDB drivers.</span></span>
               </button>
             </div>
           )}

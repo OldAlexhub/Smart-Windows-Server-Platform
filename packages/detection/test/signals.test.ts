@@ -173,6 +173,17 @@ describe("database detection", () => {
     expect(a.database.patterns.map((p) => p.vars.url)).toEqual(["DATABASE_URL"]);
   });
 
+  it("detects MongoDB transaction requirements from application code", () => {
+    const a = analyzeProject(
+      project({
+        "package.json": expressPkg({ mongoose: "8" }),
+        "server.js": "mongoose.connect(process.env.MONGO_URL); await mongoose.connection.transaction(async (session) => run(session));",
+      }),
+    );
+    expect(a.database).toMatchObject({ kind: "mongodb", transactions: true });
+    expect(a.database.evidence).toContain("Uses MongoDB transactions (server.js)");
+  });
+
   it("no database needed for a plain static site or DB-free API", () => {
     expect(analyzeProject(project({ "package.json": expressPkg(), "server.js": "" })).database.required).toBe(false);
   });

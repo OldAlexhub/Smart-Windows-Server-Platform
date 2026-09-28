@@ -1,8 +1,10 @@
+import { randomBytes } from "node:crypto";
 import { MongoClient } from "mongodb";
-import { newId, NexusError, sqlIdentifier } from "@nexus/shared";
+import { newId, NexusError, randomToken, sqlIdentifier } from "@nexus/shared";
 import type { SecretVault } from "@nexus/security";
 import type { Migration, StateStore } from "@nexus/state";
 import type { DocumentEngine } from "./ferretdb";
+import type { MongoDbFleet } from "./mongodb";
 import { generateDbPassword, type ConnectionInfo } from "./manager";
 import type { PostgresEngine } from "./postgres";
 
@@ -32,7 +34,13 @@ export const documentDatabaseMigrations: Migration[] = [
       PRIMARY KEY (database_id, app_id)
     );`,
   },
+  {
+    id: "documents/003_provider",
+    up: `ALTER TABLE docdb_databases ADD COLUMN provider TEXT NOT NULL DEFAULT 'ferretdb'`,
+  },
 ];
+
+export type DocumentProvider = "ferretdb" | "mongodb";
 
 export interface ManagedDocumentDatabase {
   id: string;
@@ -41,6 +49,9 @@ export interface ManagedDocumentDatabase {
   engine: "mongodb";
   /** The database name apps use in their mongodb:// address. */
   dbName: string;
+  /** The concrete managed engine. MongoDB provides replica-set transactions. */
+  provider: DocumentProvider;
+  transactions: boolean;
   appIds: string[];
   createdAt: string;
 }
@@ -49,6 +60,8 @@ export interface ManagedDocumentDatabase {
 const NEXUS_ACCESS = "__nexus";
 const MARKER = "_nexus";
 const secretName = (dbId: string, appId: string) => `docdb:${dbId}/app:${appId}/password`;
+export const mongoAdminSecret = (databaseKey: string) => `docdb-engine:${databaseKey}/admin-password`;
+export const mongoKeyFileSecret = (databaseKey: string) => `docdb-engine:${databaseKey}/replica-key`;
 const RESERVED = new Set(["admin", "local", "config", "nexus", "public"]);
 
 export interface PortReservations {
@@ -64,31 +77,29 @@ interface Row {
   pg_database: string;
   owner_role: string;
   port: number;
+  provider: DocumentProvider | null;
   created_at: string;
 }
 
 /**
- * Document (MongoDB-compatible) databases, stored in the managed PostgreSQL through FerretDB.
- *
- * Isolation model for document database "shop":
- *   PostgreSQL database docs_shop, owned by the NOLOGIN role docs_shop_owner;
- *   each connected app has its own login (member of the owner role, whose session runs as the owner);
- *   PUBLIC has no access, so one app can never read, change or even list another app's data;
- *   a separate FerretDB process serves only this database, on its own private port.
+ * Managed document databases. New databases use isolated MongoDB replica sets with authentication,
+ * transactions and exact BSON behavior. Existing FerretDB-on-PostgreSQL databases retain their
+ * original isolated endpoint and per-app PostgreSQL roles for backward compatibility.
  */
 export class DocumentDatabaseManager {
   constructor(
     private readonly store: StateStore,
     private readonly vault: SecretVault,
-    private readonly pg: PostgresEngine,
-    private readonly engine: DocumentEngine,
+    private readonly pg: PostgresEngine | null,
+    private readonly engine: DocumentEngine | null,
     private readonly ports: PortReservations,
+    private readonly mongo: MongoDbFleet | null = null,
   ) {
     store.migrate(documentDatabaseMigrations);
   }
 
   get version(): string {
-    return this.engine.version;
+    return this.mongo?.version ?? this.engine?.version ?? "unavailable";
   }
 
   list(): ManagedDocumentDatabase[] {
@@ -119,10 +130,46 @@ export class DocumentDatabaseManager {
   }
 
   /** "Create Document Database" — the only thing the user types is the name. */
-  async createDatabase(input: { displayName: string; appId?: string }): Promise<{ database: ManagedDocumentDatabase; connection: ConnectionInfo | null }> {
+  async createDatabase(input: { displayName: string; appId?: string; provider?: DocumentProvider }): Promise<{ database: ManagedDocumentDatabase; connection: ConnectionInfo | null }> {
     const name = input.displayName.trim();
     if (!name) throw NexusError.invalid("Please give the database a name.");
     const dbName = this.uniqueDbName(name);
+    const provider = input.provider ?? (this.mongo ? "mongodb" : "ferretdb");
+    if (provider === "mongodb") return this.createMongoDatabase(name, dbName, input.appId);
+    return this.createFerretDatabase(name, dbName, input.appId);
+  }
+
+  private async createMongoDatabase(name: string, dbName: string, appId?: string): Promise<{ database: ManagedDocumentDatabase; connection: ConnectionInfo | null }> {
+    if (!this.mongo) throw NexusError.conflict("The transaction-capable MongoDB component is not installed.");
+    const databaseKey = `mongo_${dbName}`;
+    const port = await this.ports.allocate("mongodb", databaseKey);
+    const id = newId();
+    this.vault.set(mongoAdminSecret(databaseKey), randomToken(48), "system");
+    // MongoDB keyfiles accept standard base64, not the URL-safe alphabet used by randomToken.
+    this.vault.set(mongoKeyFileSecret(databaseKey), randomBytes(64).toString("base64"), "system");
+    this.store.run(
+      "INSERT INTO docdb_databases (id, name, db_name, pg_database, owner_role, port, provider, created_at) VALUES (?, ?, ?, ?, ?, ?, 'mongodb', ?)",
+      [id, name, dbName, databaseKey, "", port, new Date().toISOString()],
+    );
+    try {
+      await this.ensureRunning(id);
+      await this.withDatabase(id, async (client, database) => {
+        await client.db(database).collection(MARKER).insertOne({ _id: "database" as never, createdBy: "nexus", name, provider: "mongodb", transactions: true, createdAt: new Date() });
+      });
+      const connection = appId ? await this.grantAppAccess(id, appId) : null;
+      return { database: this.require(id), connection };
+    } catch (error) {
+      this.store.run("DELETE FROM docdb_databases WHERE id = ?", [id]);
+      this.ports.release("mongodb", databaseKey);
+      this.vault.delete(mongoAdminSecret(databaseKey));
+      this.vault.delete(mongoKeyFileSecret(databaseKey));
+      await this.mongo.destroy(databaseKey).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  private async createFerretDatabase(name: string, dbName: string, appId?: string): Promise<{ database: ManagedDocumentDatabase; connection: ConnectionInfo | null }> {
+    if (!this.pg || !this.engine) throw NexusError.conflict("The FerretDB compatibility engine is not available.");
     const pgDatabase = `docs_${dbName}`;
     const owner = `${pgDatabase}_owner`;
     const admin = await this.pg.adminClient();
@@ -147,7 +194,7 @@ export class DocumentDatabaseManager {
     }
     const port = await this.ports.allocate("ferretdb", pgDatabase);
     const id = newId();
-    this.store.run("INSERT INTO docdb_databases (id, name, db_name, pg_database, owner_role, port, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", [
+    this.store.run("INSERT INTO docdb_databases (id, name, db_name, pg_database, owner_role, port, provider, created_at) VALUES (?, ?, ?, ?, ?, ?, 'ferretdb', ?)", [
       id,
       name,
       dbName,
@@ -160,7 +207,7 @@ export class DocumentDatabaseManager {
     await this.withDatabase(id, async (c, db) => {
       await c.db(db).collection(MARKER).insertOne({ _id: "database" as never, createdBy: "nexus", name, createdAt: new Date() });
     });
-    const connection = input.appId ? await this.grantAppAccess(id, input.appId) : null;
+    const connection = appId ? await this.grantAppAccess(id, appId) : null;
     return { database: this.require(id), connection };
   }
 
@@ -171,6 +218,30 @@ export class DocumentDatabaseManager {
     if (existing && this.vault.has(secretName(databaseId, appId))) return this.connectionInfo(databaseId, appId);
     const login = existing?.login_role ?? this.uniqueLogin(`d_${db.db_name.slice(0, 30)}_${appId === NEXUS_ACCESS ? "nexus" : sqlIdentifier(appId, 20)}`);
     const password = generateDbPassword();
+    if (this.provider(db) === "mongodb") {
+      if (!this.mongo) throw NexusError.conflict("The transaction-capable MongoDB component is not installed.");
+      await this.ensureRunning(databaseId);
+      const admin = await this.mongo.adminClient(db.pg_database, db.port);
+      try {
+        try {
+          await admin.db(db.db_name).command({ createUser: login, pwd: password, roles: [{ role: "readWrite", db: db.db_name }] });
+        } catch (error) {
+          if ((error as { code?: number }).code !== 51003 && !/already exists/i.test((error as Error).message)) throw error;
+          await admin.db(db.db_name).command({ updateUser: login, pwd: password, roles: [{ role: "readWrite", db: db.db_name }] });
+        }
+      } finally {
+        await admin.close();
+      }
+      this.vault.set(secretName(databaseId, appId), password, appId === NEXUS_ACCESS ? "system" : `app:${appId}`);
+      this.store.run(`INSERT INTO docdb_access (database_id, app_id, login_role, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(database_id, app_id) DO UPDATE SET login_role = excluded.login_role`, [
+        databaseId,
+        appId,
+        login,
+        new Date().toISOString(),
+      ]);
+      return this.connectionInfo(databaseId, appId);
+    }
+    if (!this.pg) throw NexusError.conflict("The database server is not available.");
     const admin = await this.pg.adminClient();
     try {
       const qi = (s: string) => admin.escapeIdentifier(s);
@@ -196,6 +267,22 @@ export class DocumentDatabaseManager {
     const row = this.store.get<{ login_role: string }>("SELECT login_role FROM docdb_access WHERE database_id = ? AND app_id = ?", [databaseId, appId]);
     if (!row) return;
     const db = this.requireRow(databaseId);
+    if (this.provider(db) === "mongodb") {
+      if (!this.mongo) throw NexusError.conflict("The transaction-capable MongoDB component is not installed.");
+      await this.ensureRunning(databaseId);
+      const admin = await this.mongo.adminClient(db.pg_database, db.port);
+      try {
+        await admin.db(db.db_name).command({ dropUser: row.login_role }).catch((error) => {
+          if ((error as { code?: number }).code !== 11 && !/not found/i.test((error as Error).message)) throw error;
+        });
+      } finally {
+        await admin.close();
+      }
+      this.vault.delete(secretName(databaseId, appId));
+      this.store.run("DELETE FROM docdb_access WHERE database_id = ? AND app_id = ?", [databaseId, appId]);
+      return;
+    }
+    if (!this.engine || !this.pg) throw NexusError.conflict("The FerretDB compatibility engine is not available.");
     await this.engine.stopOne(db.pg_database);
     await this.pg.adminQuery("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = $1", [row.login_role]);
     await this.pg.adminQuery(`DROP ROLE IF EXISTS "${row.login_role.replace(/"/g, '""')}"`);
@@ -211,6 +298,17 @@ export class DocumentDatabaseManager {
     if (!row) throw NexusError.notFound("Document database access for this application");
     const password = this.vault.require(secretName(databaseId, appId));
     const host = "127.0.0.1";
+    if (this.provider(db) === "mongodb") {
+      if (!this.mongo) throw NexusError.conflict("The transaction-capable MongoDB component is not installed.");
+      return {
+        host,
+        port: db.port,
+        database: db.db_name,
+        user: row.login_role,
+        password,
+        url: this.mongo.applicationUrl(db.pg_database, db.port, db.db_name, row.login_role, password),
+      };
+    }
     return {
       host,
       port: db.port,
@@ -225,6 +323,13 @@ export class DocumentDatabaseManager {
   /** Starts this database's endpoint if needed (moving it if another program took its port). */
   async ensureRunning(databaseId: string): Promise<void> {
     const db = this.requireRow(databaseId);
+    if (this.provider(db) === "mongodb") {
+      if (!this.mongo) throw NexusError.conflict("This database needs the transaction-capable MongoDB component. Reinstall Nexus to add it.");
+      // A replica-set member's address is part of its durable identity. Never silently move it.
+      await this.mongo.ensure(db.pg_database, db.port);
+      return;
+    }
+    if (!this.engine) throw NexusError.conflict("This legacy database needs the FerretDB compatibility component.");
     try {
       await this.engine.ensure(db.pg_database, db.port);
     } catch (e) {
@@ -244,6 +349,20 @@ export class DocumentDatabaseManager {
   async rotatePassword(databaseId: string, appId: string): Promise<ConnectionInfo> {
     const info = this.connectionInfo(databaseId, appId);
     const password = generateDbPassword();
+    const db = this.requireRow(databaseId);
+    if (this.provider(db) === "mongodb") {
+      if (!this.mongo) throw NexusError.conflict("The transaction-capable MongoDB component is not installed.");
+      await this.ensureRunning(databaseId);
+      const admin = await this.mongo.adminClient(db.pg_database, db.port);
+      try {
+        await admin.db(db.db_name).command({ updateUser: info.user, pwd: password, roles: [{ role: "readWrite", db: db.db_name }] });
+      } finally {
+        await admin.close();
+      }
+      this.vault.set(secretName(databaseId, appId), password, `app:${appId}`);
+      return this.connectionInfo(databaseId, appId);
+    }
+    if (!this.pg) throw NexusError.conflict("The database server is not available.");
     await this.pg.adminQuery(`ALTER ROLE "${info.user.replace(/"/g, '""')}" PASSWORD '${password}'`);
     this.vault.set(secretName(databaseId, appId), password, `app:${appId}`);
     await this.dropPooledLogins(databaseId);
@@ -256,6 +375,8 @@ export class DocumentDatabaseManager {
    */
   private async dropPooledLogins(databaseId: string): Promise<void> {
     const db = this.requireRow(databaseId);
+    if (this.provider(db) === "mongodb") return;
+    if (!this.engine) return;
     if (!this.engine.running().includes(db.pg_database)) return;
     await this.engine.stopOne(db.pg_database);
     await this.ensureRunning(databaseId);
@@ -281,8 +402,19 @@ export class DocumentDatabaseManager {
   async dropDatabase(databaseId: string, confirmation: string): Promise<void> {
     const db = this.requireRow(databaseId);
     if (confirmation !== db.name && confirmation !== db.db_name) throw NexusError.invalid(`Type "${db.name}" to confirm deleting this database.`);
-    await this.engine.stopOne(db.pg_database);
     const access = this.store.all<{ app_id: string; login_role: string }>("SELECT app_id, login_role FROM docdb_access WHERE database_id = ?", [databaseId]);
+    if (this.provider(db) === "mongodb") {
+      if (!this.mongo) throw NexusError.conflict("The transaction-capable MongoDB component is not installed.");
+      await this.mongo.destroy(db.pg_database);
+      for (const item of access) this.vault.delete(secretName(databaseId, item.app_id));
+      this.vault.delete(mongoAdminSecret(db.pg_database));
+      this.vault.delete(mongoKeyFileSecret(db.pg_database));
+      this.ports.release("mongodb", db.pg_database);
+      this.store.run("DELETE FROM docdb_databases WHERE id = ?", [databaseId]);
+      return;
+    }
+    if (!this.engine || !this.pg) throw NexusError.conflict("The FerretDB compatibility engine is not available.");
+    await this.engine.stopOne(db.pg_database);
     const admin = await this.pg.adminClient();
     try {
       const qi = (s: string) => admin.escapeIdentifier(s);
@@ -327,6 +459,10 @@ export class DocumentDatabaseManager {
     return r;
   }
 
+  private provider(row: Row): DocumentProvider {
+    return row.provider === "mongodb" ? "mongodb" : "ferretdb";
+  }
+
   private uniqueLogin(base: string): string {
     let name = base.slice(0, 60);
     for (let i = 2; this.store.get("SELECT 1 FROM docdb_access WHERE login_role = ?", [name]); i++) name = `${base.slice(0, 56)}_${i}`;
@@ -334,11 +470,14 @@ export class DocumentDatabaseManager {
   }
 
   private toModel(r: Row): ManagedDocumentDatabase {
+    const provider = this.provider(r);
     return {
       id: r.id,
       name: r.name,
       engine: "mongodb",
       dbName: r.db_name,
+      provider,
+      transactions: provider === "mongodb",
       createdAt: r.created_at,
       appIds: this.store.all<{ app_id: string }>("SELECT app_id FROM docdb_access WHERE database_id = ? AND app_id != ?", [r.id, NEXUS_ACCESS]).map((x) => x.app_id),
     };

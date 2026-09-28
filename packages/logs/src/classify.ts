@@ -31,6 +31,7 @@ export function classifyLine(line: string): EntryLevel {
     return "error";
   }
   if (/^Invalid (?:environment )?configuration:?$|^-\s+[A-Z][A-Z0-9_]*\s+(?:is|are)\s+required\b/i.test(t)) return "error";
+  if (/^(?:server|application|service)\s+(?:startup\s+)?failed[.!]?$/i.test(t)) return "error";
   if (/\b(deprecat\w*|warning)\b/i.test(t)) return "warning";
   return "info";
 }

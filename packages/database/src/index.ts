@@ -3,6 +3,7 @@ export * from "./manager";
 export * from "./wiring";
 export * from "./browser";
 export * from "./ferretdb";
+export * from "./mongodb";
 export * from "./documents";
 export * from "./doc-browser";
 export * from "./doc-compat";

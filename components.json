@@ -62,6 +62,21 @@
         }
       ]
     },
+    "mongodb": {
+      "version": "8.0.26",
+      "license": "Server Side Public License v1",
+      "url": "https://fastdl.mongodb.org/windows/mongodb-windows-x86_64-8.0.26.zip",
+      "sha256": "acdf84ed6df2660dfb008c2f77f74a0d21acec38e6b77ef10e789b201348ee12",
+      "archive": "zip",
+      "extract": [
+        "mongodb-win32-x86_64-windows-8.0.26/bin/mongod.exe",
+        "mongodb-win32-x86_64-windows-8.0.26/LICENSE-Community.txt",
+        "mongodb-win32-x86_64-windows-8.0.26/MPL-2",
+        "mongodb-win32-x86_64-windows-8.0.26/README",
+        "mongodb-win32-x86_64-windows-8.0.26/THIRD-PARTY-NOTICES"
+      ],
+      "stripPrefix": "mongodb-win32-x86_64-windows-8.0.26"
+    },
     "ferretdb": {
       "version": "1.24.2",
       "license": "Apache-2.0",

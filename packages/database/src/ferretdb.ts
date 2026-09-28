@@ -36,7 +36,7 @@ export function locateFerretDb(opts: { configured?: string | null; bundledRoots?
  * FerretDbFleet is the implementation; the interface keeps the manager independent of it.
  */
 export interface DocumentEngine {
-  readonly kind: "ferretdb";
+  readonly kind: "ferretdb" | "mongodb";
   readonly version: string;
   /** Makes sure the endpoint for this PostgreSQL database is running on `port`. */
   ensure(pgDatabase: string, port: number): Promise<void>;

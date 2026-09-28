@@ -76,10 +76,13 @@ export class DatabaseLinkService {
     const password = reveal ? info.password : "••••••••";
     const user = encodeURIComponent(info.user);
     const db = encodeURIComponent(info.database);
+    const passwordPart = reveal ? encodeURIComponent(password) : password;
     const url =
       kind === "tables"
-        ? `postgres://${user}:${reveal ? encodeURIComponent(password) : password}@${host}:${rec.port}/${db}`
-        : `mongodb://${user}:${reveal ? encodeURIComponent(password) : password}@${host}:${rec.port}/${db}?authMechanism=PLAIN&authSource=%24external&directConnection=true`;
+        ? `postgres://${user}:${passwordPart}@${host}:${rec.port}/${db}`
+        // Keep the provider's authentication and replica-set options, changing only the address to
+        // the private-network relay. directConnection keeps drivers on that tunnel endpoint.
+        : `mongodb://${user}:${passwordPart}@${host}:${rec.port}/${db}${new URL(info.url).search}`;
     return { available: !blocker, blocker, enabled: true, host, port: rec.port, database: info.database, user: info.user, url };
   }
 

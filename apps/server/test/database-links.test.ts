@@ -106,11 +106,11 @@ describe("connect to a database from another server (private network only)", () 
     expect((await call("GET", `/api/v1/database-links/tables/${shop.id}`)).body.enabled).toBe(false);
   }, 120_000);
 
-  it.runIf(() => !!ctx.documents)("shares a document database through the compatibility layer", async () => {
+  it.runIf(() => !!ctx.documents)("shares a document database through the private relay", async () => {
     const docs = ctx.documents!;
     const { database } = await docs.createDatabase({ displayName: "Site" });
     const shared = await call("POST", `/api/v1/database-links/documents/${database.id}`);
-    expect(shared.body.url).toMatch(/^mongodb:\/\/.+@127\.0\.0\.1:\d+\/site\?authMechanism=PLAIN/);
+    expect(shared.body.url).toMatch(/^mongodb:\/\/.+@127\.0\.0\.1:\d+\/site\?authSource=site&replicaSet=nexus_[0-9a-f]{16}&directConnection=true$/);
     const c = new MongoClient(shared.body.url, { serverSelectionTimeoutMS: 5000 });
     await c.connect();
     try {

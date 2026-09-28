@@ -41,6 +41,8 @@ export async function documentSummary(ctx: NexusContext, id: string): Promise<Da
     sizeBytes: stats?.sizeBytes ?? 0,
     tableCount: stats?.collections ?? 0,
     documentCount: stats?.documents ?? 0,
+    documentProvider: d.provider,
+    transactions: d.transactions,
     connectionCount: 0,
     ownerAppIds: d.appIds,
     usedBy: appsUsingDb(ctx, d.appIds),
@@ -68,7 +70,15 @@ export const documentRoutes: RouteModule = (app, ctx) => {
   app.get("/api/v1/documents/engine", async (req) => {
     requirePermission(req, "server.view");
     if (!ctx.documents || !ctx.documentSource) return { available: false, state: "unavailable", engine: null, source: null, version: null, running: 0 };
-    return { available: true, state: "ready", engine: "FerretDB", source: ctx.documentSource.source, version: ctx.documentSource.version, running: ctx.documentEngine?.running().length ?? 0 };
+    return {
+      available: true,
+      state: "ready",
+      engine: ctx.documentSource.engine,
+      source: ctx.documentSource.source,
+      version: ctx.documentSource.version,
+      transactions: ctx.documentSource.transactions,
+      running: (ctx.documentMongoEngine?.running().length ?? 0) + (ctx.documentEngine?.running().length ?? 0),
+    };
   });
 
   app.post("/api/v1/documents", async (req) => {

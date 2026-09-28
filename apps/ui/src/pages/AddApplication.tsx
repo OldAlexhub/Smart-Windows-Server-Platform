@@ -44,14 +44,14 @@ interface AnalysisResult {
   name: string;
   summary: string;
   findings: string[];
-  database: { required: boolean; kind: string | null; evidence: string[] };
+  database: { required: boolean; kind: string | null; transactions?: boolean; evidence: string[] };
   storage: { required: boolean; directories?: string[]; evidence?: string[] };
   externalAccessRecommended: boolean;
   /** Settings › Domains › Base domain, if set: new apps get <app>.<base domain>. */
   baseDomain?: string | null;
   settingsNeeded: { name: string; required: boolean; secret: boolean; exampleValue: string | null }[];
   warnings: string[];
-  existingDatabases: { id: string; name: string }[];
+  existingDatabases: { id: string; name: string; provider?: string; transactions?: boolean }[];
   analysis: { components: unknown[] };
 }
 
@@ -206,18 +206,23 @@ function AnalysisStep({ analysis, name, setName, settings, setSetting, onBack, o
 
 function DataStep({ analysis, choice, setChoice, onBack, onNext }: { analysis: AnalysisResult; choice: DataChoice; setChoice: (c: DataChoice) => void; onBack: () => void; onNext: () => void }) {
   const needed = analysis.database.required;
-  const existing = analysis.existingDatabases;
+  const mongo = analysis.database.kind === "mongodb";
+  const needsTransactions = mongo && !!analysis.database.transactions;
+  const existing = needsTransactions ? analysis.existingDatabases.filter((db) => db.transactions) : analysis.existingDatabases;
+  const externalLabel = mongo ? "MongoDB replica set" : "PostgreSQL database";
+  const externalPlaceholder = mongo ? "mongodb://user:password@host/database?replicaSet=…" : "postgresql://user:password@host/database";
   const valid = choice.mode === "existing" ? !!choice.databaseId : choice.mode === "external" ? !!choice.externalUrl.trim() : true;
   return (
     <>
       <WizardHead title="Set up application data" sub={needed ? "A database was detected. Nexus recommends a new, isolated database for this application." : existing.length ? "No database requirement was detected. You can still connect one of your current databases if this application uses it." : "No database requirement was detected, so no database is needed."} />
       <Card>
         <div className="choice-stack" role="radiogroup" aria-label="Database choice">
-          {needed && <Choice selected={choice.mode === "new"} icon={<Database size={21} />} title="Create a new database" description="Recommended · Nexus creates it, secures it, connects the app, and backs it up." onClick={() => setChoice({ mode: "new" })} />}
+          {needed && <Choice selected={choice.mode === "new"} icon={<Database size={21} />} title="Create a new database" description={needsTransactions ? "Recommended · Nexus creates an isolated MongoDB replica set with transaction support, secures it, and backs it up." : "Recommended · Nexus creates it, secures it, connects the app, and backs it up."} onClick={() => setChoice({ mode: "new" })} />}
           {existing.length > 0 && <Choice selected={choice.mode === "existing"} icon={<Server size={21} />} title="Use an existing Nexus database" description="Give this application its own secure access to a database already on this server." onClick={() => setChoice({ mode: "existing", databaseId: choice.mode === "existing" ? choice.databaseId : existing[0]!.id })}>{choice.mode === "existing" && <select className="select nested-control" value={choice.databaseId} onClick={(e) => e.stopPropagation()} onChange={(e) => setChoice({ mode: "existing", databaseId: e.target.value })}>{existing.map((db) => <option value={db.id} key={db.id}>{db.name}</option>)}</select>}</Choice>}
-          {needed && <Choice selected={choice.mode === "external"} icon={<Network size={21} />} title="Connect an external database" description="Use a PostgreSQL database managed somewhere else." onClick={() => setChoice({ mode: "external", externalUrl: choice.mode === "external" ? choice.externalUrl : "" })}>{choice.mode === "external" && <label className="field nested-control">Connection address<input className="input mono" type="password" autoComplete="off" placeholder="postgresql://…" value={choice.externalUrl} onClick={(e) => e.stopPropagation()} onChange={(e) => setChoice({ mode: "external", externalUrl: e.target.value })} /><span className="hint">Encrypted in the Nexus vault and never shown again.</span></label>}</Choice>}
+          {needed && <Choice selected={choice.mode === "external"} icon={<Network size={21} />} title="Connect an external database" description={`Use a ${externalLabel} managed somewhere else${needsTransactions ? "; it must support transactions" : ""}.`} onClick={() => setChoice({ mode: "external", externalUrl: choice.mode === "external" ? choice.externalUrl : "" })}>{choice.mode === "external" && <label className="field nested-control">Connection address<input className="input mono" type="password" autoComplete="off" placeholder={externalPlaceholder} value={choice.externalUrl} onClick={(e) => e.stopPropagation()} onChange={(e) => setChoice({ mode: "external", externalUrl: e.target.value })} /><span className="hint">Encrypted in the Nexus vault and never shown again.</span></label>}</Choice>}
           <Choice selected={choice.mode === "none"} icon={<HardDrive size={21} />} title={needed ? "This application doesn’t need a database" : "No database"} description={needed ? "Choose this only if the detected database settings are unused." : "Nexus will deploy the application without database credentials."} onClick={() => setChoice({ mode: "none" })} />
         </div>
+        {needsTransactions && <div className="notice row" style={{ marginTop: 16 }}><ShieldCheck size={18} /><span><strong>Transactions required.</strong> Nexus will use a real MongoDB replica set. Older compatibility databases are hidden because they cannot safely run this application.</span></div>}
         {analysis.storage.required && <div className="notice row" style={{ marginTop: 16 }}><ShieldCheck size={18} /><span><strong>File storage detected.</strong> Nexus will create a private upload area and connect it automatically.</span></div>}
         <div className="wizard-actions"><button className="btn" onClick={onBack}><ArrowLeft size={16} /> Back</button><span className="spacer" /><button className="btn primary large" disabled={!valid} onClick={onNext}>Continue <ArrowRight size={17} /></button></div>
       </Card>

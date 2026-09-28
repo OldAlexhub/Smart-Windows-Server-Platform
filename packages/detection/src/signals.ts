@@ -407,9 +407,21 @@ export function detectDatabase(snap: ProjectSnapshot, a: ProjectAnalysis): void 
   const required = libs.size > 0 || dbEnv.length > 0;
   if (required && !kind) kind = "unknown-sql";
 
+  // Transactions are a server capability, not merely a driver feature. Compatibility layers and
+  // standalone MongoDB processes cannot satisfy these calls, so detect them before provisioning.
+  const transactionEvidence = kind === "mongodb"
+    ? runtimeSources(snap, a).find((source) => {
+        const text = snap.read(source) ?? "";
+        return /\b(?:withTransaction|startTransaction|runInTransaction|assertTransactionSupport)\b|\b(?:mongoose\.)?connection\.transaction\s*\(/.test(text);
+      })
+    : undefined;
+  const transactions = !!transactionEvidence;
+  if (transactions) evidence.push(`Uses MongoDB transactions (${transactionEvidence})`);
+
   a.database = {
     required,
     kind,
+    transactions,
     evidence,
     libraries: [...libs],
     patterns: !required ? [] : kind === "mongodb" ? findMongoPatterns(a.env) : findDbPatterns(a.env, a.components.some((c) => c.dependencies.includes("pg"))),

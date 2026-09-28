@@ -57,6 +57,8 @@ export interface DbConfigPattern {
 export interface DatabaseRequirement {
   required: boolean;
   kind: DatabaseKind | null;
+  /** The application uses multi-document transactions and therefore needs a MongoDB replica set. */
+  transactions?: boolean;
   /** Evidence in plain words: "Uses the pg library", "DATABASE_URL in .env.example". */
   evidence: string[];
   libraries: string[];

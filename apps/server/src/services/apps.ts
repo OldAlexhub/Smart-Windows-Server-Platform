@@ -499,6 +499,18 @@ export class AppManager {
     if ((data.mode === "new" || data.mode === "existing") && analysis.database.kind === "mongodb") {
       // MongoDB apps get a document database of their own.
       const docs = await this.ctx.startDocuments();
+      if (analysis.database.transactions) {
+        const requestedId = app.documentDatabaseId ?? (data.mode === "existing" ? data.databaseId : undefined);
+        if (requestedId) {
+          const requested = docs.get(requestedId);
+          if (!requested) throw NexusError.invalid("Choose which document database this application should use.");
+          if (!requested.transactions) {
+            throw NexusError.conflict(`${requested.name} is a legacy compatibility database and cannot run MongoDB transactions. Create a new Nexus document database for this application.`);
+          }
+        } else if (!this.ctx.documentMongoEngine) {
+          throw NexusError.conflict("This application requires MongoDB transactions, but the transaction-capable Nexus database engine is not installed.");
+        }
+      }
       if (!app.documentDatabaseId) {
         if (data.mode === "new") {
           const { database, connection } = await docs.createDatabase({ displayName: data.databaseName || app.name, appId });
@@ -533,7 +545,12 @@ export class AppManager {
       }
       job.step("database", "done", conn!.database);
     } else if (data.mode === "external") {
-      if (data.externalUrl) this.ctx.vault.set(secretKey(appId, "DATABASE_URL"), data.externalUrl, `app:${appId}`);
+      if (data.externalUrl) {
+        const names = [...new Set(analysis.database.patterns.flatMap((pattern) => pattern.vars.url ? [pattern.vars.url] : []))];
+        for (const name of names.length ? names : ["DATABASE_URL"]) {
+          this.ctx.vault.set(secretKey(appId, name), data.externalUrl, `app:${appId}`);
+        }
+      }
       job.step("database", "done", "External database");
     } else {
       job.step("database", "skipped");
@@ -601,7 +618,8 @@ export class AppManager {
     const started = await this.startRelease(appId, release, { swap: true, onLog: (l) => job.log(l) });
     if (started !== "running") {
       const tail = this.ctx.logs.search(`app:${appId}`, { level: "problems", limit: 5 }).map((e) => e.message).join("\n");
-      const problem = explainError(tail || this.supervisors.get(appId)?.detail || "", { appName: app.name, databasePort: this.ctx.postgres?.port ?? null, databaseRunning: true, credentialsValid: true });
+      const recent = this.ctx.logs.tail(`app:${appId}`, 30).slice(-12).map((e) => e.message).join("\n");
+      const problem = explainError(tail || recent || this.supervisors.get(appId)?.detail || "", { appName: app.name, databasePort: this.ctx.postgres?.port ?? null, databaseRunning: true, credentialsValid: true });
       if (wasServing && this.supervisors.get(appId)?.status === "running") {
         // Nothing changed for visitors: report the failed update without marking the app broken.
         throw new NexusError("infrastructure", `The new version of ${app.name} didn't start, so the current version is still running.`, {
@@ -866,7 +884,8 @@ export class AppManager {
           }
           if (app.documentDatabaseId && this.ctx.documents) {
             const r = await this.ctx.documents.testConnection(this.ctx.documents.connectionInfo(app.documentDatabaseId, appId));
-            return r.ok ? "MongoDB/FerretDB connected" : `MongoDB/FerretDB failed: ${r.error}`;
+            const provider = this.ctx.documents.get(app.documentDatabaseId)?.provider === "mongodb" ? "MongoDB replica set" : "FerretDB";
+            return r.ok ? `${provider} connected` : `${provider} failed: ${r.error}`;
           }
           return "no database configured";
         },

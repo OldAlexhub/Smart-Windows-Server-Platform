@@ -10,7 +10,7 @@
  *   node/            node.exe + npm + corepack (runtime for Nexus and for Node applications)
  *   server/          main.mjs (bundled Core Service) + service-config.mjs
  *   ui/              control center (static files served by the service)
- *   components/      postgresql, ferretdb, duckdb-extensions, caddy, winsw (pinned in components.json)
+ *   components/      PostgreSQL, MongoDB, FerretDB, DuckDB extensions, Caddy, WinSW (pinned in components.json)
  *   helpers/         python/nexus, r/nexusR — imported by pipeline scripts
  *   scripts/         service.mjs (register / upgrade / remove the Windows service)
  */
@@ -38,13 +38,18 @@ rmSync(out, { recursive: true, force: true });
 mkdirSync(out, { recursive: true });
 
 // ---------------------------------------------------------------- components
-step("Components (PostgreSQL, FerretDB, DuckDB extensions, Caddy, WinSW)");
+step("Components (PostgreSQL, MongoDB, FerretDB, DuckDB extensions, Caddy, WinSW)");
 execFileSync(process.execPath, [join(root, "scripts/fetch-components.mjs")], { stdio: "inherit" });
 const manifest = JSON.parse(readFileSync(join(root, "components.json"), "utf8"));
 for (const [name, c] of Object.entries(manifest.components)) {
   const src = join(root, "vendor", name, c.version);
   if (!existsSync(join(src, ".complete"))) throw new Error(`Component ${name} ${c.version} is missing.`);
-  cpSync(src, join(out, "components", name, c.version), { recursive: true });
+  cpSync(src, join(out, "components", name, c.version), {
+    recursive: true,
+    // MongoDB's archive includes multi-gigabyte debugger symbols and mongos. Nexus needs only the
+    // local mongod server plus its notices, keeping the offline installer reasonably sized.
+    filter: name === "mongodb" ? (path) => !/\.(pdb)$/i.test(path) && !/[\\/]mongos\.exe$/i.test(path) && !/[\\/]vc_redist\.x64\.exe$/i.test(path) && !/[\\/]Install-Compass\.ps1$/i.test(path) : undefined,
+  });
 }
 
 // ---------------------------------------------------------------- UI

@@ -11,7 +11,11 @@ import {
   CompatibleDocumentEngine,
   FerretDbFleet,
   locateFerretDb,
+  locateMongoDb,
   locatePostgresBinaries,
+  mongoAdminSecret,
+  mongoKeyFileSecret,
+  MongoDbFleet,
   PostgresEngine,
   tunePostgres,
 } from "@nexus/database";
@@ -81,14 +85,16 @@ export class NexusContext {
   postgres: PostgresEngine | null = null;
   databases: DatabaseManager | null = null;
   dataBrowser: DataBrowser | null = null;
-  /** Document (MongoDB-compatible) databases, served by FerretDB and stored in the managed PostgreSQL. */
+  /** Managed document databases: MongoDB replica sets plus legacy FerretDB databases. */
   documents: DocumentDatabaseManager | null = null;
   documentEngine: FerretDbFleet | null = null;
-  /** The engine apps connect to: the compatibility layer in front of FerretDB. */
+  /** Real MongoDB replica sets used by transaction-dependent applications. */
+  documentMongoEngine: MongoDbFleet | null = null;
+  /** Legacy engine apps connect to: the compatibility layer in front of FerretDB. */
   documentCompat: CompatibleDocumentEngine | null = null;
   documentBrowser: DocumentBrowser | null = null;
-  /** Which FerretDB build is in use: shipped with Nexus, or chosen by an administrator. */
-  documentSource: { source: "bundled" | "configured"; version: string } | null = null;
+  /** The preferred engine for newly created document databases. */
+  documentSource: { engine: "MongoDB" | "FerretDB"; source: "bundled" | "configured"; version: string; transactions: boolean } | null = null;
   deployments: DeploymentManager | null = null;
   storage: StorageManager | null = null;
   backups: BackupManager | null = null;
@@ -211,14 +217,15 @@ export class NexusContext {
       this.log.warn("PostgreSQL binaries not found; database features disabled until the component is installed");
     }
 
-    // Document databases: one FerretDB process per database, started when first needed.
+    // Document databases: existing FerretDB databases remain supported; new databases use an
+    // isolated MongoDB replica set so applications get real multi-document transactions.
     const ferretDir = this.component("ferretdb");
     // Advanced: an administrator may point Nexus at another FerretDB build.
     const ferret = locateFerretDb({ configured: this.settings.get<string | null>("documents.ferretdbPath", null), bundledRoots: ferretDir ? [join(ferretDir, "..")] : [] });
+    let ferretCompat: CompatibleDocumentEngine | null = null;
     if (ferret && this.postgres) {
       const pg = this.postgres;
       this.documentEngine = new FerretDbFleet({ bin: ferret, pgPort: () => this.postgres?.port ?? pg.port, stateDir: join(this.opts.paths.root, "documents"), logger: this.log.child({ module: "documents" }) });
-      this.documentSource = { source: ferret.source, version: ferret.version };
       // Apps talk to the compatibility layer; FerretDB listens on an internal port behind it.
       const fleet = this.documentEngine;
       this.documentCompat = new CompatibleDocumentEngine(
@@ -226,9 +233,32 @@ export class NexusContext {
         async (pgDatabase, ownedByUs) => (await this.ports.ensureAvailable("ferretdb-engine", pgDatabase, ownedByUs)).port,
         this.log.child({ module: "documents" }),
       );
-      this.documents = new DocumentDatabaseManager(this.store, this.vault, pg, this.documentCompat, this.ports);
+      ferretCompat = this.documentCompat;
+    }
+    const mongoDir = this.component("mongodb");
+    const mongo = locateMongoDb({ configured: this.settings.get<string | null>("documents.mongodbPath", null), bundledRoots: mongoDir ? [join(mongoDir, "..")] : [] });
+    if (mongo) {
+      this.documentMongoEngine = new MongoDbFleet({
+        bin: mongo,
+        stateDir: join(dp.database, "mongodb"),
+        credentials: (databaseKey) => ({
+          username: "nexus_admin",
+          password: this.vault.require(mongoAdminSecret(databaseKey)),
+          keyFile: this.vault.require(mongoKeyFileSecret(databaseKey)),
+        }),
+        logger: this.log.child({ module: "mongodb" }),
+      });
+      this.documentSource = { engine: "MongoDB", source: mongo.source, version: mongo.version, transactions: true };
+    } else if (ferret) {
+      this.documentSource = { engine: "FerretDB", source: ferret.source, version: ferret.version, transactions: false };
+    }
+    if (ferretCompat || this.documentMongoEngine) {
+      this.documents = new DocumentDatabaseManager(this.store, this.vault, this.postgres, ferretCompat, this.ports, this.documentMongoEngine);
       this.documentBrowser = new DocumentBrowser(this.documents);
-      this.stopHooks.push(() => this.documentCompat?.stop() ?? this.documentEngine?.stop());
+      this.stopHooks.push(async () => {
+        await this.documentMongoEngine?.stop();
+        await this.documentCompat?.stop();
+      });
     }
 
     // Backups
@@ -247,7 +277,7 @@ export class NexusContext {
     });
     this.monitoring.start();
     this.stopHooks.push(() => this.monitoring?.stop());
-    this.log.info("data services started", { postgres: !!this.postgres, documents: this.documentSource ? `${this.documentSource.source} FerretDB ${this.documentSource.version}` : null });
+    this.log.info("data services started", { postgres: !!this.postgres, documents: this.documentSource ? `${this.documentSource.source} ${this.documentSource.engine} ${this.documentSource.version}` : null });
   }
 
   /**
@@ -256,7 +286,7 @@ export class NexusContext {
    */
   startDocuments(): Promise<DocumentDatabaseManager> {
     if (!this.documents) {
-      return Promise.reject(NexusError.conflict(this.postgres ? "The document database component is not installed. Reinstall Nexus to add it." : "Document databases need the database server, which isn't running."));
+      return Promise.reject(NexusError.conflict("The document database component is not installed. Reinstall Nexus to add it."));
     }
     return Promise.resolve(this.documents);
   }
@@ -288,4 +318,3 @@ export class NexusContext {
     return existsSync(paths.localTokenFile) ? readFileSync(paths.localTokenFile, "utf8").trim() : null;
   }
 }
-

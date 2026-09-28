@@ -97,6 +97,7 @@ describe("MongoDB applications get a document database automatically", () => {
     expect(ctx.documents).not.toBeNull();
     expect(ctx.documents!.list()).toEqual([]);
     expect(ctx.documentEngine!.running()).toEqual([]);
+    expect(ctx.documentMongoEngine!.running()).toEqual([]);
   });
 
   it("explains what it found in plain language", async () => {
@@ -104,6 +105,16 @@ describe("MongoDB applications get a document database automatically", () => {
     expect(r.body.findings).toContain("Document database (MongoDB)");
     expect(r.body.warnings).toEqual([]);
   });
+
+  it("connects an external MongoDB address using the variable the application reads", async () => {
+    const externalUrl = "mongodb://external_user:external_password@127.0.0.1:27017/shop?replicaSet=external";
+    const created = await call("POST", "/api/v1/apps", { sourceDir: join(home, "src", "Shop"), name: "External Shop", data: { mode: "external", externalUrl }, access: "private" });
+    const job = await waitJob(created.body.jobId);
+    expect(job.status).toBe("succeeded");
+    expect(ctx.vault.get(`app:${created.body.appId}/env/MONGO_URI`)).toBe(externalUrl);
+    const { mongo } = await getJson(ctx.ports.get(`app:${created.body.appId}`, "http")!);
+    expect(mongo).toBe(externalUrl);
+  }, 120_000);
 
   it("creates the database, wires MONGO_URI, deploys and verifies", async () => {
     const created = await call("POST", "/api/v1/apps", { sourceDir: join(home, "src", "Shop"), name: "Shop", data: { mode: "new" }, access: "private" });
@@ -120,7 +131,7 @@ describe("MongoDB applications get a document database automatically", () => {
     // The running app received its own credentials, and they work for its own database only.
     const port = ctx.ports.get("app:shop", "http")!;
     const { mongo } = await getJson(port);
-    expect(mongo).toMatch(/^mongodb:\/\/d_shop_shop:[A-Za-z0-9]{32}@127\.0\.0\.1:\d+\/shop\?authMechanism=PLAIN/);
+    expect(mongo).toMatch(/^mongodb:\/\/d_shop_shop:[A-Za-z0-9]{32}@127\.0\.0\.1:\d+\/shop\?authSource=shop&replicaSet=nexus_[0-9a-f]{16}&directConnection=true$/);
     const c = new MongoClient(mongo!, { serverSelectionTimeoutMS: 5000 });
     await c.connect();
     try {
@@ -159,7 +170,7 @@ describe("Document database browser, import/export, backup and restore", () => {
     const r = await call("GET", "/api/v1/databases");
     expect(r.body).toEqual([expect.objectContaining({ name: "Shop", engine: "mongodb", dbName: "shop", status: "healthy", ownerAppIds: ["shop"] })]);
     const engine = await call("GET", "/api/v1/documents/engine");
-    expect(engine.body).toMatchObject({ available: true, state: "ready", engine: "FerretDB", source: "bundled" });
+    expect(engine.body).toMatchObject({ available: true, state: "ready", engine: "MongoDB", source: "bundled", transactions: true });
   });
 
   it("creates collections and adds, finds, edits and deletes documents", async () => {

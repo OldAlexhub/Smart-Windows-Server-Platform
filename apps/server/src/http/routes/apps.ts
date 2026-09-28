@@ -76,7 +76,7 @@ export function appRoutes(apps: AppManager): RouteModule {
         name: a.name,
         summary: a.summary,
         findings,
-        database: { required: a.database.required, kind: a.database.kind, evidence: a.database.evidence },
+        database: { required: a.database.required, kind: a.database.kind, transactions: !!a.database.transactions, evidence: a.database.evidence },
         storage: a.storage,
         externalAccessRecommended: a.externalAccessRecommended,
         // Settings › Domains: new apps are suggested <app>.<base domain>.
@@ -87,7 +87,7 @@ export function appRoutes(apps: AppManager): RouteModule {
         warnings: a.warnings,
         existingDatabases:
           a.database.kind === "mongodb"
-            ? (ctx.documents?.list() ?? []).map((d) => ({ id: d.id, name: d.name }))
+            ? (ctx.documents?.list() ?? []).map((d) => ({ id: d.id, name: d.name, provider: d.provider, transactions: d.transactions }))
             : (ctx.databases?.list() ?? []).map((d) => ({ id: d.id, name: d.name })),
         analysis: a,
       };

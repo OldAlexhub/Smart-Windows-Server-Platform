@@ -91,7 +91,7 @@ export function analyzeProject(root: string): ProjectAnalysis {
     summary: "",
     components,
     env: [],
-    database: { required: false, kind: null, evidence: [], libraries: [], patterns: [] },
+    database: { required: false, kind: null, transactions: false, evidence: [], libraries: [], patterns: [] },
     storage: { required: false, evidence: [] },
     port: { value: null, envVar: null, evidence: null },
     health: { mode: "automatic", candidate: null, endpoint: null, rejection: null },

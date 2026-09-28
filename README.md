@@ -2,7 +2,7 @@
 
 **Turn a Windows PC into your own private server for apps, databases, files, data pipelines and local AI, without learning server administration.**
 
-Pick an app folder, press **Deploy**, and Nexus handles the rest. It detects what the app needs, installs its dependencies, creates and connects its database, keeps its files, publishes it over HTTPS, watches its health, and backs it all up. Everything runs on your own machine. Nexus needs no cloud account and makes no calls home, and every component it ships is free, open-source software.
+Pick an app folder, press **Deploy**, and Nexus handles the rest. It detects what the app needs, installs its dependencies, creates and connects its database, keeps its files, publishes it over HTTPS, watches its health, and backs it all up. Everything runs on your own machine. Nexus needs no cloud account and makes no calls home; its bundled components are pinned, checksum-verified, and use open-source or source-available licences.
 
 > Status: working, under active development (v0.1). Windows 10/11, 64-bit.
 
@@ -13,7 +13,7 @@ Pick an app folder, press **Deploy**, and Nexus handles the rest. It detects wha
 | | |
 |---|---|
 | **One-click app hosting** | Node.js, Python (Flask, FastAPI, Django…), R Shiny (`app.R`), static sites and more are detected automatically and run as supervised, isolated processes. Releases are immutable, so rollback is one click. |
-| **Managed databases** | PostgreSQL for tables, plus MongoDB-compatible document databases (FerretDB on PostgreSQL, with a compatibility layer that runs aggregation features FerretDB lacks, such as `$cond` in `$group`). Each app gets its own database and its own login, wired into the setting names its code already uses (`DATABASE_URL`, `MONGO_URL`, …). |
+| **Managed databases** | PostgreSQL for tables, plus isolated MongoDB replica sets for document applications, including real multi-document transactions and exact BSON types. Existing FerretDB-on-PostgreSQL databases remain supported as a legacy compatibility engine. Each app gets its own database and login, wired into the setting names its code already uses (`DATABASE_URL`, `MONGO_URL`, …). |
 | **Data tools** | Spreadsheet-style browser, CSV/Excel/JSON import that suggests the table and key, and read-only "ask a question" queries with charts. |
 | **Pipelines** | Visual designer and YAML pipelines (SQL, Python, R, connectors) on a sandboxed DuckDB engine, with schedules, retries, resume-from-failure, versioning and plain-English failure explanations. |
 | **Backups** | Encrypted (AES-256-GCM) and verified, on a schedule, with full or partial restore. They work on NTFS and exFAT drives. |
@@ -56,7 +56,7 @@ Guides:
 npm install
 
 # Download the pinned third-party components into vendor/ (sha256-verified):
-# PostgreSQL, Caddy, Python, WinSW, DuckDB extensions, and FerretDB (built from source with a pinned Go).
+# PostgreSQL, MongoDB, Caddy, Python, WinSW, DuckDB extensions, and FerretDB (built from source with a pinned Go).
 node scripts/fetch-components.mjs
 
 # Start the Core Service from source (state in .nexus-dev/). It prints a one-click sign-in link.
@@ -84,7 +84,8 @@ npm run dev:ui
 ```
 Nexus Desktop (Tauri, WebView2) ──HTTP 127.0.0.1──▶ Nexus Core Service (Windows service, Node.js)
                                                      ├── Applications, deployments, runtime supervision
-                                                     ├── PostgreSQL + FerretDB   (127.0.0.1 only)
+                                                     ├── PostgreSQL + MongoDB   (127.0.0.1 only)
+                                                     │   └── FerretDB legacy compatibility
                                                      ├── Caddy HTTPS gateway     (the only public listener)
                                                      ├── Pipelines (DuckDB, Python, R)
                                                      ├── Backups, monitoring, logs, audit, plugins
@@ -101,7 +102,7 @@ A TypeScript monorepo (npm workspaces):
 | `packages/detection` | Works out what an app is and what it needs from its folder |
 | `packages/deployment` | Immutable releases, dependency installs, the bundled Python |
 | `packages/runtime` | Process supervision, isolation, health checks |
-| `packages/database` | PostgreSQL and FerretDB management, data browser, app wiring |
+| `packages/database` | PostgreSQL, MongoDB replica-set and legacy FerretDB management, data browser, app wiring |
 | `packages/network` | Gateway (Caddy), domains, firewall, WireGuard, UPnP |
 | `packages/pipelines` | The pipeline engine, connectors, scheduler, templates |
 | `packages/backups` | Encrypted backup and restore |
@@ -119,13 +120,14 @@ More detail: [docs/architecture.md](docs/architecture.md) · plugin development:
 
 ---
 
-## Open source only
+## Third-party components and licences
 
-Every dependency, bundled component and AI model uses an OSI-approved open-source licence. Components are pinned by version and sha256 in [`components.json`](components.json):
+Bundled components are pinned by version and SHA-256 in [`components.json`](components.json). Most use OSI-approved open-source licences. MongoDB Community Server uses the source-available SSPL v1, so distributors and hosted-service operators should review its terms for their use case.
 
 | Component | Licence |
 |---|---|
 | PostgreSQL | PostgreSQL License |
+| MongoDB Community Server | Server Side Public License v1 (source-available) |
 | FerretDB (built from source) | Apache-2.0 |
 | Caddy | Apache-2.0 |
 | CPython (python-build-standalone) | PSF-2.0 |

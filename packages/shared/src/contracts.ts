@@ -69,6 +69,10 @@ export interface DatabaseSummary {
   tableCount: number;
   /** MongoDB only: number of documents. */
   documentCount?: number;
+  /** MongoDB only: the managed server implementation. */
+  documentProvider?: "mongodb" | "ferretdb";
+  /** MongoDB only: whether multi-document transactions are supported. */
+  transactions?: boolean;
   connectionCount: number;
   ownerAppIds: string[];
   /** Applications (that still exist) using this database: only these block deleting it. */

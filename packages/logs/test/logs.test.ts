@@ -33,6 +33,7 @@ describe("classifyLine", () => {
     ["level=error msg=\"x\"", "error"],
     ["Invalid environment configuration:", "error"],
     ["- CLIENT_URL is required when NODE_ENV=production.", "error"],
+    ["Server startup failed.", "error"],
   ])("%s → %s", (line, level) => {
     expect(classifyLine(line)).toBe(level);
   });
