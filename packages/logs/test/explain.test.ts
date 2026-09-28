@@ -58,6 +58,10 @@ describe("explainError", () => {
   it("missing business settings the user must provide", () => {
     const p = explainError("Error: Missing required environment variable: STRIPE_API_KEY", ctx);
     expect(p).toMatchObject({ title: "Setting Needed", repair: { id: "app.open-settings", params: { variable: "STRIPE_API_KEY" } } });
+    expect(explainError("Invalid environment configuration:\n- CLIENT_URL is required when NODE_ENV=production.", ctx)).toMatchObject({
+      title: "Setting Needed",
+      repair: { id: "app.open-settings", params: { variable: "CLIENT_URL" } },
+    });
     expect(explainError("KeyError: 'GOOGLE_MAPS_KEY'", ctx).summary).toContain("GOOGLE_MAPS_KEY");
   });
 

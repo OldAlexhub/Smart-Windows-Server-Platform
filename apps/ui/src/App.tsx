@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router";
-import { ApiError, get, post } from "./lib/api";
+import { ApiError, get, onAuthenticationRequired, post } from "./lib/api";
 import { Layout } from "./components/Layout";
 import { Spinner } from "./components/ui";
 import { SignIn } from "./pages/SignIn";
@@ -36,6 +36,7 @@ async function exchangeLocalToken(): Promise<void> {
   const token = url.searchParams.get("local");
   if (!token) return;
   url.searchParams.delete("local");
+  url.searchParams.delete("desktop");
   history.replaceState(null, "", url.pathname + url.search + url.hash);
   try {
     await post("/auth/local", { token });
@@ -47,10 +48,15 @@ async function exchangeLocalToken(): Promise<void> {
 export function App() {
   const [me, setMe] = useState<Me | null>(null);
   const [state, setState] = useState<"loading" | "signin" | "ready">("loading");
+  const [sessionEnded, setSessionEnded] = useState(false);
+  const [desktop] = useState(() => new URL(location.href).searchParams.get("desktop") === "1");
+  const hasAuthenticated = useRef(false);
 
   const load = useCallback(async () => {
     try {
       setMe(await get<Me>("/auth/me"));
+      hasAuthenticated.current = true;
+      setSessionEnded(false);
       setState("ready");
     } catch (e) {
       if (e instanceof ApiError && (e.status === 401 || e.status === 403)) setState("signin");
@@ -59,7 +65,13 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    const stopListening = onAuthenticationRequired(() => {
+      if (hasAuthenticated.current) setSessionEnded(true);
+      setMe(null);
+      setState("signin");
+    });
     void exchangeLocalToken().then(load);
+    return stopListening;
   }, [load]);
 
   if (state === "loading")
@@ -68,7 +80,7 @@ export function App() {
         <Spinner label="Connecting to your server…" />
       </div>
     );
-  if (state === "signin" || !me) return <SignIn onDone={load} />;
+  if (state === "signin" || !me) return <SignIn onDone={load} sessionEnded={sessionEnded} desktop={desktop} />;
   if (!me.setupCompleted && me.permissions.includes("server.settings")) {
     return (
       <FirstRun

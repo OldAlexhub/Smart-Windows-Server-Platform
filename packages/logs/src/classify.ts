@@ -30,6 +30,7 @@ export function classifyLine(line: string): EntryLevel {
   if (/^Traceback \(most recent call last\)|^\w*(Error|Exception)(:|$)|Unhandled|uncaught|\bECONNREFUSED\b|\bEADDRINUSE\b|^\s*at .+\(.+:\d+:\d+\)$/i.test(t)) {
     return "error";
   }
+  if (/^Invalid (?:environment )?configuration:?$|^-\s+[A-Z][A-Z0-9_]*\s+(?:is|are)\s+required\b/i.test(t)) return "error";
   if (/\b(deprecat\w*|warning)\b/i.test(t)) return "warning";
   return "info";
 }

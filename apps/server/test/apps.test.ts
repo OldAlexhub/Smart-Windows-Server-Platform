@@ -103,7 +103,7 @@ describe("Add Application → deploy (primary scenario, dependency-free app)", (
     expect(r.status).toBe(200);
     // DATABASE_URL, JWT_SECRET, UPLOAD_DIR, STRIPE_API_KEY, PORT (Nexus's own NEXUS_* variables aren't counted)
     expect(r.body.findings).toEqual(["Node.js backend", "PostgreSQL database", "File uploads", "5 settings"]);
-    expect(r.body.settingsNeeded).toEqual(["STRIPE_API_KEY"]);
+    expect(r.body.settingsNeeded).toEqual([{ name: "STRIPE_API_KEY", required: false, secret: true, exampleValue: null }]);
     expect(r.body.analysis.health).toMatchObject({ mode: "automatic", candidate: { path: "/health", evidence: "Node.js route in server.js" }, endpoint: null });
   });
 
@@ -114,6 +114,7 @@ describe("Add Application → deploy (primary scenario, dependency-free app)", (
       data: { mode: "new", databaseName: "TaxiOps" },
       access: "internet",
       domain: "taxiops.test.example",
+      settings: { STRIPE_API_KEY: "sk_test_from_deploy" },
     });
     expect(created.status).toBe(200);
     expect(created.body.appId).toBe("taxiops");
@@ -147,6 +148,7 @@ describe("Add Application → deploy (primary scenario, dependency-free app)", (
     expect(seen.jwtLength).toBeGreaterThanOrEqual(40); // generated secret
     expect(seen.uploadDirWritable).toBe(true); // persistent upload folder
     expect(seen.nexusToken).toBe(true);
+    expect(seen.stripe).toBe("sk_test_from_deploy"); // supplied before the first start
     const pub = await get(gwPorts.httpPort, "taxiops.test.example");
     expect(JSON.parse(pub.body).version).toBe("1.4.7");
 

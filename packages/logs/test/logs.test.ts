@@ -31,6 +31,8 @@ describe("classifyLine", () => {
     ["GET /api/drivers 200 12ms", "info"],
     ["Server listening on 43127", "info"],
     ["level=error msg=\"x\"", "error"],
+    ["Invalid environment configuration:", "error"],
+    ["- CLIENT_URL is required when NODE_ENV=production.", "error"],
   ])("%s → %s", (line, level) => {
     expect(classifyLine(line)).toBe(level);
   });

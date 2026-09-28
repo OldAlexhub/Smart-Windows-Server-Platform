@@ -1,3 +1,4 @@
+import { posix } from "node:path";
 import { BRAND } from "@nexus/shared";
 import type { ProjectSnapshot } from "./snapshot";
 import { joinRel } from "./snapshot";
@@ -94,19 +95,78 @@ const PY_ENV = [
 
 const R_ENV = [/Sys\.getenv\(\s*["']([A-Z_][A-Z0-9_]*)["']/g];
 
+const JS_IMPORTS = [
+  /\b(?:from|import)\s*["'`]([^"'`]+)["'`]/g,
+  /\b(?:require|import)\s*\(\s*["'`]([^"'`]+)["'`]\s*\)/g,
+];
+const JS_MODULE_EXTS = ["", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".mts", ".cts", ".tsx"];
+const AUXILIARY_SOURCE_DIR = /(^|\/)(scripts?|migrations?|maintenance|tools?|tasks?)(\/|$)/i;
+
+function resolveLocalModule(snap: ProjectSnapshot, from: string, specifier: string): string | null {
+  if (!specifier.startsWith(".")) return null;
+  const base = posix.normalize(posix.join(posix.dirname(from), specifier));
+  if (base === ".." || base.startsWith("../")) return null;
+  const extension = posix.extname(base);
+  const withoutExtension = extension ? base.slice(0, -extension.length) : base;
+  const candidates = [
+    base,
+    ...JS_MODULE_EXTS.slice(1).map((ext) => `${withoutExtension}${ext}`),
+    ...JS_MODULE_EXTS.slice(1).map((ext) => `${base}/index${ext}`),
+  ];
+  return candidates.find((candidate) => snap.has(candidate)) ?? null;
+}
+
+/**
+ * For a Node backend with a known entry file, scan only files reachable from that entry point.
+ * This keeps maintenance scripts and one-off migrations from becoming runtime requirements.
+ */
+function runtimeSources(snap: ProjectSnapshot, analysis: ProjectAnalysis): string[] {
+  const selected = new Set<string>();
+  for (const component of analysis.components) {
+    const sources = snap.sources(component.path);
+    const entry = component.entryFile ? joinRel(component.path, component.entryFile) : null;
+    if (component.runtime !== "node" || !entry || !snap.has(entry)) {
+      for (const source of sources) selected.add(source);
+      continue;
+    }
+    const allowed = new Set(sources);
+    const pending = [entry];
+    while (pending.length) {
+      const source = pending.pop()!;
+      if (selected.has(source) || !allowed.has(source)) continue;
+      selected.add(source);
+      const text = snap.read(source);
+      if (!text) continue;
+      for (const pattern of JS_IMPORTS) {
+        for (const match of text.matchAll(pattern)) {
+          const resolved = resolveLocalModule(snap, source, match[1]!);
+          if (resolved && allowed.has(resolved) && !selected.has(resolved)) pending.push(resolved);
+        }
+      }
+    }
+    // Keep the detector useful for applications that load root modules dynamically or through a
+    // framework. Conventional one-off script folders stay excluded unless the startup graph
+    // explicitly imports one of their files.
+    for (const source of sources) if (!AUXILIARY_SOURCE_DIR.test(source)) selected.add(source);
+  }
+  return [...selected].sort();
+}
+
 export function detectEnv(snap: ProjectSnapshot, a: ProjectAnalysis): void {
   const found = new Map<string, EnvVarRequirement>();
-  const add = (name: string, source: string, example: string | null) => {
+  const explicitlyRequired: Array<{ name: string; source: string }> = [];
+  const add = (name: string, source: string, example: string | null, required = false) => {
     // Variables Nexus itself injects (NEXUS_API_TOKEN...) are not requirements of the app.
     if (IGNORED_ENV.has(name) || name.startsWith("npm_") || name.startsWith(BRAND.envPrefix)) return;
     const existing = found.get(name);
     if (existing) {
       if (!existing.sources.includes(source)) existing.sources.push(source);
       if (existing.exampleValue === null && example !== null) existing.exampleValue = example;
+      if (required) existing.required = true;
       return;
     }
     const category = categorizeEnv(name);
-    found.set(name, { name, sources: [source], exampleValue: example, category, managed: isManaged(name, category) });
+    found.set(name, { name, sources: [source], exampleValue: example, category, managed: isManaged(name, category), required });
   };
 
   for (const f of snap.files.filter((f) => ENV_EXAMPLE_FILES.test(f))) {
@@ -116,7 +176,7 @@ export function detectEnv(snap: ProjectSnapshot, a: ProjectAnalysis): void {
   for (const f of snap.files.filter((f) => ENV_REAL_FILES.test(f))) {
     for (const k of parseDotenv(snap.read(f) ?? "").keys()) add(k, f, null);
   }
-  for (const f of snap.sources()) {
+  for (const f of runtimeSources(snap, a)) {
     const text = snap.read(f);
     if (!text) continue;
     const patterns = f.endsWith(".py") ? PY_ENV : JS_ENV;
@@ -129,10 +189,23 @@ export function detectEnv(snap: ProjectSnapshot, a: ProjectAnalysis): void {
         }
       }
     }
+    // Many applications validate configuration with plain-language messages before opening a
+    // port. Record the evidence now, then apply it only to names independently found as
+    // environment variables. This avoids treating business terms such as "CAP is required" as
+    // configuration.
+    for (const m of text.matchAll(/\b([A-Z][A-Z0-9_]*)\s+(?:is|are)\s+required\b/g)) {
+      explicitlyRequired.push({ name: m[1]!, source: f });
+    }
   }
   for (const f of snap.sources("", /\.r$/i)) {
     const text = snap.read(f);
     if (text) for (const re of R_ENV) for (const m of text.matchAll(re)) add(m[1]!, f, null);
+  }
+  for (const evidence of explicitlyRequired) {
+    const existing = found.get(evidence.name);
+    if (!existing) continue;
+    existing.required = true;
+    if (!existing.sources.includes(evidence.source)) existing.sources.push(evidence.source);
   }
   a.env = [...found.values()].sort((x, y) => x.name.localeCompare(y.name));
 }

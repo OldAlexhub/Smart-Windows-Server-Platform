@@ -85,6 +85,7 @@ export interface CreateAppInput {
   data: { mode: DataMode; databaseName?: string; databaseId?: string; externalUrl?: string };
   access: AccessMode;
   domain?: string | null;
+  settings?: Record<string, string>;
 }
 
 interface AppRow {
@@ -319,6 +320,10 @@ export class AppManager {
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, '{}', ?, 'running', ?, ?)`,
       [id, name, input.sourceDir, toJson(analysis), input.access, toJson(hosts), input.data.mode, analysis.database.kind === "mongodb" ? null : (input.data.databaseId ?? null), toJson(AUTO_RESOURCES), now, now],
     );
+    const allowedSettings = new Set(analysis.env.filter((item) => !item.managed).map((item) => item.name));
+    for (const [setting, value] of Object.entries(input.settings ?? {})) {
+      if (allowedSettings.has(setting) && value) this.setEnv(id, setting, value);
+    }
     this.ctx.audit.record({ actor: { type: "user", ...actor }, action: "app.create", target: { type: "app", id }, details: { source: input.sourceDir, access: input.access, data: input.data.mode } });
     const job = this.deploy(id, { data: input.data, first: true });
     return { appId: id, jobId: job.id };
@@ -553,7 +558,7 @@ export class AppManager {
     if (docConn) job.log(planDocumentWiring(analysis.database, docConn).note);
     this.ensureGeneratedSecrets(appId, analysis);
     this.ensureAppToken(appId);
-    const missing = analysis.env.filter((e) => !e.managed && e.category === "secret" && !this.hasEnv(appId, e.name));
+    const missing = analysis.env.filter((e) => !e.managed && (e.required || e.category === "secret") && !this.hasEnv(appId, e.name));
     job.step("connect", "done", missing.length ? `Needs: ${missing.map((m) => m.name).join(", ")}` : "Connected");
 
     // 4. Prepare release

@@ -81,7 +81,9 @@ export function appRoutes(apps: AppManager): RouteModule {
         externalAccessRecommended: a.externalAccessRecommended,
         // Settings › Domains: new apps are suggested <app>.<base domain>.
         baseDomain: ctx.settings.get<string | null>(SETTINGS.baseDomain, null),
-        settingsNeeded: a.env.filter((e) => !e.managed && e.category === "secret").map((e) => e.name),
+        settingsNeeded: a.env
+          .filter((e) => !e.managed && (e.required || e.category === "secret"))
+          .map((e) => ({ name: e.name, required: e.required, secret: e.category === "secret", exampleValue: e.exampleValue })),
         warnings: a.warnings,
         existingDatabases:
           a.database.kind === "mongodb"
@@ -105,6 +107,7 @@ export function appRoutes(apps: AppManager): RouteModule {
           }),
           access: accessSchema,
           domain: z.string().max(253).nullable().optional(),
+          settings: z.record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/), z.string().max(10_000)).optional(),
         })
         .parse(req.body);
       if (body.data.mode === "new" && !authorize(user, "databases.create")) throw NexusError.forbidden("You can't create databases.");

@@ -58,6 +58,28 @@ describe("environment variables", () => {
     );
     expect(a.env.map((e) => e.name)).toEqual(["DB_HOST", "DB_NAME", "DB_PASSWORD", "DB_USER"]);
   });
+
+  it("uses the Node startup import graph and finds explicit required settings", () => {
+    const a = analyzeProject(
+      project({
+        "package.json": expressPkg(),
+        ".env.example": "MONGO_URL=mongodb://localhost/app\nCLIENT_URL=http://localhost:3000\nTRUST_PROXY=false\n",
+        "server.js": 'import "./config/environment.js";\napp.listen(3000);',
+        "config/environment.js": `
+          const client = process.env.CLIENT_URL;
+          const trust = process.env.TRUST_PROXY;
+          if (!client) throw new Error("CLIENT_URL is required when NODE_ENV=production.");
+          if (!trust) throw new Error("TRUST_PROXY is required when NODE_ENV=production.");
+        `,
+        "controllers/report.js": `if (!req.body.cap) throw new Error("CAP is required");`,
+        "scripts/maintenance/createAdmin.js": "const password = process.env.ADMIN_PASSWORD;",
+      }),
+    );
+    expect(a.env.find((item) => item.name === "CLIENT_URL")).toMatchObject({ required: true, category: "url" });
+    expect(a.env.find((item) => item.name === "TRUST_PROXY")).toMatchObject({ required: true, category: "config" });
+    expect(a.env.some((item) => item.name === "ADMIN_PASSWORD")).toBe(false);
+    expect(a.env.some((item) => item.name === "CAP")).toBe(false);
+  });
 });
 
 describe("database detection", () => {

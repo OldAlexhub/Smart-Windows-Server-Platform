@@ -79,7 +79,9 @@ async fn connect() -> Result<String, String> {
         if token.is_empty() || !token.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
             return Err("The local sign-in key is unreadable. Restart the Nexus service and try again.".to_string());
         }
-        Ok(format!("http://127.0.0.1:{port}/?local={token}"))
+        // The marker lets the web UI offer a return through this trusted loader if its
+        // management session expires. It is removed from the address bar with the token.
+        Ok(format!("http://127.0.0.1:{port}/?desktop=1&local={token}"))
     })
     .await
     .map_err(|e| e.to_string())?

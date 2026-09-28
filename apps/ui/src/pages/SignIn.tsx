@@ -3,7 +3,7 @@ import { BRAND } from "@nexus/shared/brand";
 import { ApiError, post } from "../lib/api";
 
 /** Password (+ two-step code) sign-in, used for remote administration and additional users. */
-export function SignIn({ onDone }: { onDone: () => void }) {
+export function SignIn({ onDone, sessionEnded = false, desktop = false }: { onDone: () => void; sessionEnded?: boolean; desktop?: boolean }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [code, setCode] = useState("");
@@ -37,9 +37,27 @@ export function SignIn({ onDone }: { onDone: () => void }) {
         <div>
           <h1>{BRAND.productName}</h1>
           <p className="secondary" style={{ marginTop: 4 }}>
-            {pending ? "Enter the 6-digit code from your authenticator app." : "Sign in to manage this server."}
+            {pending
+              ? "Enter the 6-digit code from your authenticator app."
+              : sessionEnded
+                ? "Your session ended. Sign in again to continue."
+                : "Sign in to manage this server."}
           </p>
         </div>
+        {desktop && !pending && (
+          <>
+            <button
+              className="btn primary large"
+              type="button"
+              onClick={() => location.replace("http://tauri.localhost/index.html")}
+            >
+              Continue on this computer
+            </button>
+            <p className="small muted" style={{ textAlign: "center" }}>
+              or sign in with a Nexus account
+            </p>
+          </>
+        )}
         {!pending ? (
           <>
             <label className="field">
@@ -62,7 +80,7 @@ export function SignIn({ onDone }: { onDone: () => void }) {
             {error}
           </div>
         )}
-        <button className="btn primary large" disabled={busy}>
+        <button className={`btn ${desktop && !pending ? "" : "primary"} large`} disabled={busy}>
           {pending ? "Verify" : "Sign in"}
         </button>
       </form>

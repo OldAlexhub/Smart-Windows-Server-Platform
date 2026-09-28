@@ -14,6 +14,16 @@ export class ApiError extends Error {
 
 type Method = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
+type AuthenticationRequiredListener = (error: ApiError) => void;
+const authenticationRequiredListeners = new Set<AuthenticationRequiredListener>();
+const SIGN_IN_PATHS = new Set(["/auth/local", "/auth/login", "/auth/mfa"]);
+
+/** Lets the application shell replace protected screens when a session has ended. */
+export function onAuthenticationRequired(listener: AuthenticationRequiredListener): () => void {
+  authenticationRequiredListeners.add(listener);
+  return () => authenticationRequiredListeners.delete(listener);
+}
+
 /** All requests carry the CSRF header; cookies carry the session. */
 export async function api<T = unknown>(method: Method, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`/api/v1${path}`, {
@@ -29,7 +39,18 @@ export async function api<T = unknown>(method: Method, path: string, body?: unkn
   const data = text ? safeJson(text) : null;
   if (!res.ok) {
     const e = (data as { error?: { message?: string; code?: string; problem?: FriendlyProblem | null } } | null)?.error;
-    throw new ApiError(e?.message ?? `Request failed (${res.status})`, res.status, e?.code ?? "internal", e?.problem ?? null);
+    const error = new ApiError(
+      e?.message ?? `Request failed (${res.status})`,
+      res.status,
+      e?.code ?? "internal",
+      e?.problem ?? null,
+    );
+    // Authentication attempts legitimately return 401 for incorrect credentials. Every other
+    // 401 means the management session is no longer usable, regardless of which screen noticed it.
+    if (res.status === 401 && !SIGN_IN_PATHS.has(path)) {
+      for (const listener of authenticationRequiredListeners) listener(error);
+    }
+    throw error;
   }
   return data as T;
 }

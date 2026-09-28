@@ -39,6 +39,8 @@ export interface EnvVarRequirement {
   category: "database" | "storage" | "port" | "secret" | "url" | "config";
   /** Nexus will provide this automatically. */
   managed: boolean;
+  /** The application explicitly says startup cannot continue without this value. */
+  required: boolean;
 }
 
 export type DatabaseKind = "postgresql" | "mysql" | "sqlite" | "mongodb" | "mssql" | "unknown-sql";
