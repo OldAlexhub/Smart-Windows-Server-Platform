@@ -155,7 +155,7 @@ You can also open **Nexus AI** and ask:
 Before starting, place the application's files in one folder. The correct folder usually contains one of these files:
 
 - `package.json` for a Node.js application
-- `requirements.txt` or `pyproject.toml` for a Python application
+- `requirements.txt` or `pyproject.toml` for a Python application (including Streamlit)
 - `index.html` for a static website
 
 ## Step 1: Open the wizard
@@ -855,4 +855,3 @@ If you remember only five things, remember these:
 3. Keep apps **Private to this computer** until outside access is really needed.
 4. Back up before changing, deleting, restoring, or updating.
 5. Read the problem card and logs before pressing repair buttons.
-

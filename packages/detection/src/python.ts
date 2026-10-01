@@ -92,6 +92,28 @@ function rankPyFile(f: string): number {
   return (i < 0 ? 50 : i) + f.split("/").length * 10;
 }
 
+const STREAMLIT_ENTRY_NAMES = ["streamlit_app.py", "app.py", "main.py", "dashboard.py", "home.py"];
+
+/** Finds the script passed to `streamlit run`, without mistaking a multipage app's pages for its entry point. */
+function findStreamlitEntry(snap: ProjectSnapshot, path: string): string | null {
+  const relative = (file: string) => (path ? file.slice(path.length + 1) : file);
+  const files = snap.sources(path, /\.py$/i).filter((file) => !/(^|\/)pages\//i.test(relative(file)));
+  const importsStreamlit = (file: string) =>
+    /^(?:\s*)(?:import\s+streamlit\b|from\s+streamlit\s+import\b)/m.test(snap.read(file) ?? "");
+  const rank = (file: string) => {
+    const rel = relative(file);
+    const nameRank = STREAMLIT_ENTRY_NAMES.indexOf(rel.split("/").pop()!.toLowerCase());
+    return (nameRank < 0 ? 50 : nameRank) + rel.split("/").length * 10;
+  };
+  const conventional = files.find((file) => relative(file).toLowerCase() === "streamlit_app.py");
+  const imported = files.filter(importsStreamlit).sort((a, b) => rank(a) - rank(b))[0];
+  const named = files
+    .filter((file) => STREAMLIT_ENTRY_NAMES.includes(relative(file).split("/").pop()!.toLowerCase()))
+    .sort((a, b) => rank(a) - rank(b))[0];
+  const entry = conventional ?? imported ?? named;
+  return entry ? relative(entry) : null;
+}
+
 // ------------------------------------------------------------------ analyzer
 
 export function analyzePythonComponent(snap: ProjectSnapshot, path: string): ComponentAnalysis | null {
@@ -143,6 +165,37 @@ export function analyzePythonComponent(snap: ProjectSnapshot, path: string): Com
   const listen = ["--host", "127.0.0.1", "--port", "{PORT}"];
   const withPath = (spec: CommandSpec, pythonPath: string | null): CommandSpec =>
     pythonPath ? { ...spec, env: { PYTHONPATH: pythonPath } } : spec;
+
+  // Streamlit is a full web application. Run its CLI through the release's private Python
+  // environment and bind only to Nexus's loopback address and assigned port.
+  if (has("streamlit")) {
+    const entry = findStreamlitEntry(snap, path);
+    return {
+      ...base,
+      role: "fullstack",
+      framework: "Streamlit",
+      start: entry
+        ? {
+            command: "python",
+            args: [
+              "-m",
+              "streamlit",
+              "run",
+              entry,
+              "--server.address",
+              "127.0.0.1",
+              "--server.port",
+              "{PORT}",
+              "--server.headless",
+              "true",
+              "--browser.gatherUsageStats",
+              "false",
+            ],
+          }
+        : null,
+      entryFile: entry,
+    };
+  }
 
   // Django
   if (managePy || has("django")) {

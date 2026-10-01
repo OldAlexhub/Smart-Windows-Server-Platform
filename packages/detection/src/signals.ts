@@ -481,6 +481,7 @@ const FRAMEWORK_DEFAULT_PORT: Record<string, number> = {
   Flask: 5000,
   FastAPI: 8000,
   Django: 8000,
+  Streamlit: 8501,
 };
 
 export function detectPort(snap: ProjectSnapshot, a: ProjectAnalysis): void {

@@ -158,7 +158,7 @@ Now try it:
 ## 7. Applications
 
 ### Add an app
-Follow the same steps as the test app in [part 6](#6-try-it-put-the-test-app-on-your-server). Nexus understands Node.js, Python, static websites and more. If the app needs private settings (like an API key), Nexus asks for them and keeps them **encrypted**.
+Follow the same steps as the test app in [part 6](#6-try-it-put-the-test-app-on-your-server). Nexus understands Node.js, Python (including Flask, FastAPI, Django, and Streamlit), static websites and more. If the app needs private settings (like an API key), Nexus asks for them and keeps them **encrypted**.
 
 ### Choose who can see it
 When adding an app, or later in the app's **Settings** tab under **Who can access**:

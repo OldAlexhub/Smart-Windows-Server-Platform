@@ -12,7 +12,7 @@ Pick an app folder, press **Deploy**, and Nexus handles the rest. It detects wha
 
 | | |
 |---|---|
-| **One-click app hosting** | Node.js, Python (Flask, FastAPI, Django…), R Shiny (`app.R`), static sites and more are detected automatically and run as supervised, isolated processes. Releases are immutable, so rollback is one click. |
+| **One-click app hosting** | Node.js, Python (Flask, FastAPI, Django, Streamlit…), R Shiny (`app.R`), static sites and more are detected automatically and run as supervised, isolated processes. Releases are immutable, so rollback is one click. |
 | **Managed databases** | PostgreSQL for tables, plus isolated MongoDB replica sets for document applications, including real multi-document transactions and exact BSON types. Existing FerretDB-on-PostgreSQL databases remain supported as a legacy compatibility engine. Each app gets its own database and login, wired into the setting names its code already uses (`DATABASE_URL`, `MONGO_URL`, …). |
 | **Data tools** | Spreadsheet-style browser, CSV/Excel/JSON import that suggests the table and key, and read-only "ask a question" queries with charts. |
 | **Pipelines** | Visual designer and YAML pipelines (SQL, Python, R, connectors) on a sandboxed DuckDB engine, with schedules, retries, resume-from-failure, versioning and plain-English failure explanations. |

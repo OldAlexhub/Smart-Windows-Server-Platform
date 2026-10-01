@@ -29,6 +29,64 @@ describe("Python dependency files", () => {
 });
 
 describe("Python detection", () => {
+  it("Streamlit app uses a headless server on the Nexus-assigned port", () => {
+    const a = analyzeProject(
+      project({
+        "requirements.txt": "streamlit>=1.40\npandas\n",
+        "app.py": "import streamlit as st\nst.title('Fleet dashboard')\n",
+      }),
+    );
+    expect(a.runtime).toBe("python");
+    expect(a.summary).toBe("Streamlit application");
+    expect(a.components[0]).toMatchObject({
+      role: "fullstack",
+      framework: "Streamlit",
+      entryFile: "app.py",
+      start: {
+        command: "python",
+        args: [
+          "-m",
+          "streamlit",
+          "run",
+          "app.py",
+          "--server.address",
+          "127.0.0.1",
+          "--server.port",
+          "{PORT}",
+          "--server.headless",
+          "true",
+          "--browser.gatherUsageStats",
+          "false",
+        ],
+      },
+    });
+    expect(a.port).toEqual({ value: 8501, envVar: "PORT", evidence: "Nexus sets the port when starting the app" });
+  });
+
+  it("prefers streamlit_app.py and does not use a multipage page as the entry script", () => {
+    const a = analyzeProject(
+      project({
+        "pyproject.toml": `[project]\nname = "reports"\ndependencies = ["streamlit"]\n`,
+        "streamlit_app.py": "import streamlit as st\nst.write('Home')\n",
+        "main.py": "print('helper')\n",
+        "pages/01_Details.py": "import streamlit as st\nst.write('Details')\n",
+      }),
+    );
+    expect(a.components[0]).toMatchObject({
+      framework: "Streamlit",
+      entryFile: "streamlit_app.py",
+      start: { args: expect.arrayContaining(["streamlit_app.py"]) },
+    });
+  });
+
+  it("reports a helpful warning when Streamlit has no entry script", () => {
+    const a = analyzeProject(project({ "requirements.txt": "streamlit\n", "helpers/chart.py": "def chart(): pass\n" }));
+    expect(a.components[0]).toMatchObject({ framework: "Streamlit", start: null, entryFile: null });
+    expect(a.warnings).toContain(
+      "Nexus couldn't find how to start this application. You can set the start command in Advanced settings.",
+    );
+  });
+
   it("FastAPI app → uvicorn on the Nexus-assigned port", () => {
     const a = analyzeProject(
       project({
