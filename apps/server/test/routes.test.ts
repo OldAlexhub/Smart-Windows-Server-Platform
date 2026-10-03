@@ -251,14 +251,39 @@ describe("logs, dashboard, AI, users", () => {
   });
 
   it("dashboard summarises everything", async () => {
-    const d = await call("GET", "/api/v1/dashboard");
-    expect(d.body).toMatchObject({
-      apps: { total: 1, running: 1 },
-      databases: { total: 1, online: 1 },
-      externalAccess: { state: "private" },
+    const now = new Date().toISOString();
+    for (let i = 1; i <= 3; i++) {
+      ctx.store.run(
+        "INSERT INTO docdb_databases (id, name, db_name, pg_database, owner_role, port, created_at, provider) VALUES (?, ?, ?, ?, ?, ?, ?, 'mongodb')",
+        [`dashboard-doc-${i}`, `Document ${i}`, `dashboard_doc_${i}`, `dashboard_engine_${i}`, `dashboard_owner_${i}`, 47000 + i, now],
+      );
+    }
+    try {
+      const d = await call("GET", "/api/v1/dashboard");
+      expect(d.body).toMatchObject({
+        apps: { total: 1, running: 1 },
+        databases: { total: 4, online: 4 },
+        externalAccess: { state: "private" },
+      });
+      expect(d.body.health.score).toBeGreaterThan(0);
+      expect(d.body.activity.length).toBeGreaterThan(0);
+    } finally {
+      ctx.store.run("DELETE FROM docdb_databases WHERE id LIKE 'dashboard-doc-%'");
+    }
+  });
+
+  it("persists application and disk reliability summaries", async () => {
+    await services.reliability.sample();
+    const detail = await call("GET", "/api/v1/apps/fleet");
+    expect(detail.body.reliability).toMatchObject({
+      databaseHealth: "healthy",
+      last7Days: { uptimePercent: 100, crashes: 0 },
+      last30Days: { uptimePercent: 100, restarts: expect.any(Number) },
     });
-    expect(d.body.health.score).toBeGreaterThan(0);
-    expect(d.body.activity.length).toBeGreaterThan(0);
+    expect(detail.body.reliability.last30Days.availabilityChecks).toBeGreaterThan(0);
+    const system = await call("GET", "/api/v1/reliability/system?days=30");
+    expect(system.body.days).toBe(30);
+    expect(system.body.disks.length).toBeGreaterThan(0);
   });
 
   it("Ask Nexus answers from diagnostics when no AI model is ready", async () => {

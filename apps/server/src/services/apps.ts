@@ -9,7 +9,7 @@ import { sourceChangesSince, type DeploymentRecord } from "@nexus/deployment";
 import { explainError } from "@nexus/logs";
 import type { GatewaySite } from "@nexus/network";
 import { checkHttps, normalizeDomain } from "@nexus/network";
-import { AppSupervisor, buildIsolatedEnv, HealthMonitor, healthyHttpStatus, killTree, resolveCommand, runToCompletion, substituteArgs, type AppProcessConfig } from "@nexus/runtime";
+import { AppSupervisor, buildIsolatedEnv, HealthMonitor, healthyHttpStatus, killTree, resolveCommand, runToCompletion, substituteArgs, type AppProcessConfig, type HealthEvent, type ProbeResult } from "@nexus/runtime";
 
 import { DEFAULT_APP_SCOPES } from "@nexus/security";
 import {
@@ -179,6 +179,13 @@ interface ApplicationProbe {
   detail: string;
 }
 
+export interface AppReliabilityObserver {
+  onProbe(appId: string, probe: ProbeResult): void;
+  onHealthEvent(appId: string, event: HealthEvent): void;
+  onManualRestart(appId: string): void;
+  deleteApp(appId: string): void;
+}
+
 /**
  * Application Manager — turns "choose a folder, choose where data goes, choose access"
  * into a running, connected, monitored, backed-up application.
@@ -194,6 +201,7 @@ export class AppManager {
   /** Automatic updates: the newest file change already tried per app (not retried after a failure). */
   private readonly autoAttempted = new Map<string, number>();
   private autoTimer: NodeJS.Timeout | null = null;
+  private reliabilityObserver: AppReliabilityObserver | null = null;
 
   constructor(
     private readonly ctx: NexusContext,
@@ -204,6 +212,10 @@ export class AppManager {
       [...this.supervisors.entries()].filter(([, s]) => s.pid).map(([appId, s]) => ({ appId, pid: s.pid! }));
     gateway.setSitesProvider(() => this.gatewaySites());
     ctx.onStop(() => this.stopAll());
+  }
+
+  setReliabilityObserver(observer: AppReliabilityObserver): void {
+    this.reliabilityObserver = observer;
   }
 
   // ------------------------------------------------------------------ queries
@@ -892,6 +904,7 @@ export class AppManager {
       },
     );
     monitor.on("event", (e) => {
+      this.reliabilityObserver?.onHealthEvent(appId, e);
       if ((e.kind === "health_validated" || e.kind === "health_candidate_rejected") && e.diagnostics) {
         this.persistHealth(appId, e.diagnostics.monitoring);
       }
@@ -936,7 +949,10 @@ export class AppManager {
         });
       }
     });
-    monitor.on("probe", (p) => this.ctx.monitoring?.metrics.record(`app.${appId}.responseMs`, p.ms));
+    monitor.on("probe", (p) => {
+      this.ctx.monitoring?.metrics.record(`app.${appId}.responseMs`, p.ms);
+      this.reliabilityObserver?.onProbe(appId, p);
+    });
     monitor.start();
     this.monitors.set(appId, monitor);
   }
@@ -980,6 +996,7 @@ export class AppManager {
   }
 
   async restart(appId: string): Promise<AppStatus> {
+    this.reliabilityObserver?.onManualRestart(appId);
     await this.stop(appId);
     return this.start(appId);
   }
@@ -1202,6 +1219,7 @@ export class AppManager {
     if (app.documentDatabaseId) await this.ctx.documents?.revokeAppAccess(app.documentDatabaseId, appId).catch((e) => this.ctx.log.warn("could not revoke document database access", { err: e as Error }));
     // The database and backups are kept on purpose; they are removed separately and explicitly.
     this.ctx.store.run("DELETE FROM apps WHERE id = ?", [appId]);
+    this.reliabilityObserver?.deleteApp(appId);
     await this.gateway.sync();
     this.ctx.activity.add("info", `${app.name} was removed. Its database and backups were kept.`);
   }

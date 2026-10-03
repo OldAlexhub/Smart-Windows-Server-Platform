@@ -19,14 +19,16 @@ import type { AppManager } from "../../services/apps";
 import type { AiService } from "../../services/ai";
 import type { BackupService } from "../../services/backups";
 import type { GatewayService } from "../../services/gateway";
+import type { ReliabilityService } from "../../services/reliability";
 
 export function systemRoutes(deps: {
   apps: AppManager;
   ai: AiService;
   backups: BackupService;
   gateway: GatewayService;
+  reliability: ReliabilityService;
 }): RouteModule {
-  const { apps, ai, backups, gateway } = deps;
+  const { apps, ai, backups, gateway, reliability } = deps;
   return (app, ctx) => {
     // ---------------- dashboard ----------------
     app.get("/api/v1/dashboard", async (req) => {
@@ -34,6 +36,13 @@ export function systemRoutes(deps: {
       const summaries = apps.list().map((a) => apps.summary(a));
       const snap = ctx.monitoring?.latest() ?? null;
       const dbList = ctx.databases?.list() ?? [];
+      const documentTotal = (() => {
+        try {
+          return ctx.documents?.list().length ?? Number(ctx.store.get<{ n: number }>("SELECT COUNT(*) AS n FROM docdb_databases")?.n ?? 0);
+        } catch {
+          return 0;
+        }
+      })();
       const pgState = ctx.postgres ? await ctx.postgres.state() : null;
       const unprotected = ctx.backups
         ? apps
@@ -46,7 +55,9 @@ export function systemRoutes(deps: {
       const storageDisks = snap?.disks ?? [];
       const health = computeHealthScore({
         apps: summaries.map((s) => ({ name: s.name, status: s.status })),
-        databasesOffline: pgState && pgState !== "running" ? dbList.length || 1 : 0,
+        databasesOffline:
+          (pgState && pgState !== "running" ? dbList.length || 1 : 0) +
+          (!ctx.documents ? documentTotal : 0),
         cpuPercent: snap?.cpuPercent ?? null,
         memoryUsedFraction: snap ? snap.memory.usedBytes / snap.memory.totalBytes : null,
         lowestDiskFreeFraction: storageDisks.length
@@ -67,7 +78,10 @@ export function systemRoutes(deps: {
           running: summaries.filter((s) => s.status === "running").length,
           items: summaries,
         },
-        databases: { total: dbList.length, online: pgState === "running" ? dbList.length : 0 },
+        databases: {
+          total: dbList.length + documentTotal,
+          online: (pgState === "running" ? dbList.length : 0) + (ctx.documents ? documentTotal : 0),
+        },
         storage: {
           usedBytes: storageDisks.reduce((s, d) => s + (d.totalBytes - d.freeBytes), 0),
           totalBytes: storageDisks.reduce((s, d) => s + d.totalBytes, 0),
@@ -107,6 +121,12 @@ export function systemRoutes(deps: {
         .parse(req.query);
       const s = ctx.monitoring?.metrics.get(q.key);
       return { key: q.key, points: s?.range(q.rangeMinutes * 60_000) ?? [] };
+    });
+
+    app.get("/api/v1/reliability/system", async (req) => {
+      requirePermission(req, "server.view");
+      const { days } = z.object({ days: z.coerce.number().pipe(z.union([z.literal(7), z.literal(30)])).default(30) }).parse(req.query);
+      return { days, disks: reliability.diskSummary(days) };
     });
 
     // ---------------- AI ----------------

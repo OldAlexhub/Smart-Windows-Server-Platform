@@ -5,15 +5,21 @@ import {
   cpuPercent,
   MonitoringManager,
   parseNetstatE,
+  ReliabilityRepository,
   TimeSeries,
   treeCpuPercent,
   treeUsage,
   type ProcRow,
 } from "@nexus/monitoring";
+import { StateStore } from "@nexus/state";
 
 describe("parsers & math", () => {
   it("parses netstat -e", () => {
-    expect(parseNetstatE("Interface Statistics\n\n    Received   Sent\n\nBytes                    1168651455      2405421780\n")).toEqual({
+    expect(
+      parseNetstatE(
+        "Interface Statistics\n\n    Received   Sent\n\nBytes                    1168651455      2405421780\n",
+      ),
+    ).toEqual({
       rxBytes: 1168651455,
       txBytes: 2405421780,
     });
@@ -81,9 +87,130 @@ describe("computeHealthScore", () => {
   });
 });
 
+describe("ReliabilityRepository", () => {
+  it("rolls probes, resources, incidents, database health and disks into 7/30 day summaries", () => {
+    const store = StateStore.memory();
+    try {
+      const history = new ReliabilityRepository(store);
+      const t0 = Date.UTC(2026, 9, 1, 12);
+      history.recordAppSample({
+        appId: "demo",
+        status: "running",
+        expectedUp: true,
+        cpuPercent: 10,
+        memoryBytes: 100,
+        databaseHealth: "healthy",
+        at: t0,
+      });
+      history.recordProbe("demo", true, 100, t0 + 1_000);
+      history.recordProbe("demo", false, 500, t0 + 20_000);
+      history.recordAppSample({
+        appId: "demo",
+        status: "running",
+        expectedUp: true,
+        cpuPercent: 30,
+        memoryBytes: 300,
+        databaseHealth: "healthy",
+        at: t0 + 60_000,
+      });
+      history.recordAppSample({
+        appId: "demo",
+        status: "crashed",
+        expectedUp: true,
+        cpuPercent: null,
+        memoryBytes: null,
+        databaseHealth: "offline",
+        at: t0 + 120_000,
+      });
+      history.recordAppSample({
+        appId: "demo",
+        status: "stopped",
+        expectedUp: false,
+        cpuPercent: null,
+        memoryBytes: null,
+        databaseHealth: "healthy",
+        at: t0 + 180_000,
+      });
+      history.recordEvent("demo", "crash", t0 + 125_000);
+      history.recordEvent("demo", "restart", t0 + 130_000);
+      history.recordDisk("C:\\", 1_000, 400, t0);
+      history.recordDisk("C:\\", 1_000, 300, t0 + 60_000);
+
+      const summary = history.appSummary("demo", t0 + 240_000);
+      expect(summary.databaseHealth).toBe("healthy");
+      expect(summary.last7Days).toMatchObject({
+        monitoredMinutes: 3,
+        availabilityChecks: 4,
+        uptimePercent: 50,
+        averageCpuPercent: 20,
+        peakCpuPercent: 30,
+        averageMemoryBytes: 200,
+        peakMemoryBytes: 300,
+        averageResponseMs: 300,
+        peakResponseMs: 500,
+        crashes: 1,
+        restarts: 1,
+      });
+      expect(summary.last30Days.uptimePercent).toBe(50);
+      expect(history.diskSummary(30, t0 + 240_000)).toEqual([
+        {
+          mount: "C:\\",
+          lastSampleAt: new Date(t0 + 60_000).toISOString(),
+          totalBytes: 1_000,
+          usedBytes: 700,
+          averageUsedBytes: 650,
+          peakUsedBytes: 700,
+        },
+      ]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("prunes bounded history and removes an application's history", () => {
+    const store = StateStore.memory();
+    try {
+      const history = new ReliabilityRepository(store);
+      const now = Date.UTC(2026, 9, 1);
+      history.recordAppSample({
+        appId: "old",
+        status: "running",
+        expectedUp: true,
+        cpuPercent: 1,
+        memoryBytes: 2,
+        databaseHealth: "healthy",
+        at: now - 33 * 86_400_000,
+      });
+      history.recordEvent("old", "crash", now - 33 * 86_400_000);
+      history.recordDisk("C:\\", 100, 50, now - 33 * 86_400_000);
+      history.prune(now);
+      expect(store.get<{ n: number }>("SELECT COUNT(*) AS n FROM reliability_app_minutes")?.n).toBe(0);
+      expect(store.get<{ n: number }>("SELECT COUNT(*) AS n FROM reliability_events")?.n).toBe(0);
+      expect(store.get<{ n: number }>("SELECT COUNT(*) AS n FROM reliability_disk_minutes")?.n).toBe(0);
+
+      history.recordAppSample({
+        appId: "old",
+        status: "running",
+        expectedUp: true,
+        cpuPercent: 1,
+        memoryBytes: 2,
+        databaseHealth: "healthy",
+        at: now,
+      });
+      history.recordEvent("old", "restart", now);
+      history.deleteApp("old");
+      expect(history.appSummary("old", now).last30Days.availabilityChecks).toBe(0);
+    } finally {
+      store.close();
+    }
+  });
+});
+
 describe.runIf(process.platform === "win32")("MonitoringManager live", () => {
   it("samples this machine and a real app process tree", async () => {
-    const child = spawn(process.execPath, ["-e", "const a=[];setInterval(()=>a.push(new Array(1e5).fill(1)),50)"], { stdio: "ignore" });
+    const child = spawn(process.execPath, ["-e", "const a=[];setInterval(()=>a.push(new Array(1e5).fill(1)),50)"], {
+      stdio: "ignore",
+    });
     try {
       const m = new MonitoringManager({ mounts: () => ["C:\\"], appPids: () => [{ appId: "demo", pid: child.pid! }] });
       await m.sample();

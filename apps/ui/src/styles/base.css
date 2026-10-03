@@ -921,6 +921,11 @@ table.data tr:hover td {
 .app-tabs .tab { display: inline-flex; align-items: center; gap: 7px; }
 .tab-badge { min-width: 18px; height: 18px; padding: 0 5px; display: inline-grid; place-items: center; border-radius: 9px; background: var(--critical); color: white; font-size: 11px; }
 .app-overview-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.reliability-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0; }
+.reliability-grid > div { min-width: 0; padding: 4px 18px; border-left: 1px solid var(--border); }
+.reliability-grid > div:first-child { padding-left: 0; border-left: 0; }
+.reliability-grid strong { display: block; margin-top: 7px; font-size: 20px; overflow-wrap: anywhere; }
+.reliability-foot { display: flex; flex-wrap: wrap; gap: 8px 22px; margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); text-transform: capitalize; }
 .detail-list { display: flex; flex-direction: column; }
 .detail-list > div { display: grid; grid-template-columns: 115px minmax(0, 1fr); gap: 12px; padding: 9px 0; border-top: 1px solid var(--border); }
 .detail-list > div:first-child { border-top: 0; }
@@ -960,6 +965,8 @@ table.data tr:hover td {
 
 @media (max-width: 760px) {
   .app-overview-stats { grid-template-columns: 1fr; }
+  .reliability-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: 18px; }
+  .reliability-grid > div:nth-child(3) { padding-left: 0; border-left: 0; }
   .app-address { align-items: flex-start; flex-direction: column; }
   .log-toolbar { grid-template-columns: 1fr 1fr; }
   .settings-access, .new-setting { grid-template-columns: 1fr; }

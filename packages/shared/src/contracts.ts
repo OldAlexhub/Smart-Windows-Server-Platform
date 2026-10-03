@@ -54,6 +54,33 @@ export interface AppSummary {
   problem: FriendlyProblem | null;
 }
 
+// ---------- Reliability ----------
+export type DatabaseHealth = "healthy" | "offline" | "not_configured" | "unknown";
+
+export interface ReliabilityWindowSummary {
+  days: 7 | 30;
+  /** Minutes with an observation while the application was expected to be running. */
+  monitoredMinutes: number;
+  /** Process/status observations plus HTTP health checks used by the uptime calculation. */
+  availabilityChecks: number;
+  uptimePercent: number | null;
+  averageCpuPercent: number | null;
+  peakCpuPercent: number | null;
+  averageMemoryBytes: number | null;
+  peakMemoryBytes: number | null;
+  averageResponseMs: number | null;
+  peakResponseMs: number | null;
+  crashes: number;
+  restarts: number;
+}
+
+export interface AppReliabilitySummary {
+  lastSampleAt: string | null;
+  databaseHealth: DatabaseHealth;
+  last7Days: ReliabilityWindowSummary;
+  last30Days: ReliabilityWindowSummary;
+}
+
 // ---------- Databases ----------
 export type DatabaseStatus = "healthy" | "offline" | "needs_attention";
 

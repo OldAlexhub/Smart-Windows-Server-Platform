@@ -10,6 +10,7 @@ import type { RouteModule } from "../server";
 import { SETTINGS } from "../../context";
 import { isPrivateNetworkRequest, requirePermission, requireUser } from "../auth";
 import type { AppManager } from "../../services/apps";
+import type { ReliabilityService } from "../../services/reliability";
 
 const DB_FINDING: Record<string, string> = {
   postgresql: "PostgreSQL database",
@@ -26,7 +27,7 @@ const MAX_UPLOAD_BYTES = 2 * 1024 ** 3;
 const accessSchema = z.enum(["private", "internet", "authorized", "api"]);
 const PROJECT_MARKERS = ["package.json", "requirements.txt", "pyproject.toml", "manage.py", "index.html", "Pipfile"];
 
-export function appRoutes(apps: AppManager): RouteModule {
+export function appRoutes(apps: AppManager, reliability?: ReliabilityService): RouteModule {
   return (app, ctx) => {
     // ---------------- Add Application wizard ----------------
 
@@ -167,6 +168,7 @@ export function appRoutes(apps: AppManager): RouteModule {
         logCounts: ctx.logs.countsFor(`app:${id}`),
         settings: authorize(user, "app.configure", id) ? apps.envView(id, false) : [],
         activity: ctx.activity.list(10, id),
+        reliability: reliability?.appSummary(id) ?? null,
       };
     });
 

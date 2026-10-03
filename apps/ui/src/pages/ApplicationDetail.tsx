@@ -30,7 +30,7 @@ import {
 import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { formatBytes } from "@nexus/shared/format";
-import type { AccessMode, ActivityItem, AppSummary, HealthMonitoring } from "@nexus/shared/contracts";
+import type { AccessMode, ActivityItem, AppReliabilitySummary, AppSummary, HealthMonitoring } from "@nexus/shared/contracts";
 import type { FriendlyProblem } from "@nexus/shared/errors";
 import type { Me } from "../App";
 import { PageHead } from "../components/Layout";
@@ -51,6 +51,7 @@ interface AppDetailData extends AppSummary {
   logCounts: { errors: number; warnings: number; info: number };
   settings: EnvSetting[];
   activity: ActivityItem[];
+  reliability: AppReliabilitySummary | null;
 }
 
 interface Deployment { id: string; version: string; status: string; createdAt: string; activatedAt: string | null; commit: string | null; error: string | null }
@@ -86,6 +87,11 @@ function when(value: string | null): string {
   if (!value) return "Never";
   const date = new Date(value);
   return Number.isFinite(date.getTime()) ? date.toLocaleString() : value;
+}
+
+function uptime(value: number | null): string {
+  if (value === null) return "Collecting";
+  return `${value.toFixed(value >= 99 ? 2 : 1)}%`;
 }
 
 function ActionJob({ jobId, onDone }: { jobId: string; onDone: () => void }) {
@@ -132,6 +138,22 @@ function Overview({ app, canOperate, canDeploy, canDelete, busy, act }: { app: A
         <Card><div className="stat-label">Memory</div><div className="stat-value num">{formatBytes(app.memoryBytes)}</div><Meter value={memoryFraction} label="Application memory (relative to 1 GB)" /></Card>
         <Card><div className="stat-label">File Storage</div><div className="stat-value num">{formatBytes(app.storageBytes)}</div><div className="stat-sub">Persistent application files</div></Card>
       </div>
+      {app.reliability && (
+        <Card title="Reliability" sub="Rolling availability while this application is expected to run">
+          <div className="reliability-grid">
+            <div><span className="stat-label">7-day uptime</span><strong className="num">{uptime(app.reliability.last7Days.uptimePercent)}</strong></div>
+            <div><span className="stat-label">30-day uptime</span><strong className="num">{uptime(app.reliability.last30Days.uptimePercent)}</strong></div>
+            <div><span className="stat-label">Response time</span><strong className="num">{app.reliability.last30Days.averageResponseMs === null ? "Collecting" : `${app.reliability.last30Days.averageResponseMs.toFixed(0)} ms`}</strong></div>
+            <div><span className="stat-label">30-day incidents</span><strong className="num">{app.reliability.last30Days.crashes} crash{app.reliability.last30Days.crashes === 1 ? "" : "es"} · {app.reliability.last30Days.restarts} restart{app.reliability.last30Days.restarts === 1 ? "" : "s"}</strong></div>
+          </div>
+          <div className="reliability-foot small muted">
+            <span>CPU avg {app.reliability.last30Days.averageCpuPercent === null ? "—" : `${app.reliability.last30Days.averageCpuPercent.toFixed(1)}%`}</span>
+            <span>Memory avg {app.reliability.last30Days.averageMemoryBytes === null ? "—" : formatBytes(app.reliability.last30Days.averageMemoryBytes)}</span>
+            <span>Database {app.reliability.databaseHealth.replace("_", " ")}</span>
+            <span>{app.reliability.last30Days.monitoredMinutes.toLocaleString()} monitored minutes</span>
+          </div>
+        </Card>
+      )}
       <div className="grid grid-2">
         <Card title="Application" sub="Detected configuration">
           <div className="detail-list"><div><span>Framework</span><strong>{app.framework || app.runtime}</strong></div><div><span>Release</span><strong>{app.currentRelease ?? "Not deployed"}</strong></div><div><span>Last deployed</span><strong>{when(app.lastDeployedAt)}</strong></div><div><span>Source folder</span><strong className="mono ellipsis" title={app.sourceDir}>{app.sourceDir}</strong></div>{app.database && <div><span>Database</span><Link to={`/databases/${app.database.id}`}>{app.database.name}</Link></div>}</div>

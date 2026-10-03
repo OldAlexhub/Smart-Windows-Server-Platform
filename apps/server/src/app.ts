@@ -33,6 +33,7 @@ import { PipelineProposalService } from "./services/pipeline-proposals";
 import { NotificationService } from "./services/notifications";
 import { PipelineService } from "./services/pipelines";
 import { DataImportService } from "./services/imports";
+import { ReliabilityService } from "./services/reliability";
 
 export interface NexusServices {
   gateway: GatewayService;
@@ -45,12 +46,14 @@ export interface NexusServices {
   plugins: PluginManager;
   privateNetwork: PrivateNetworkService;
   databaseLinks: DatabaseLinkService;
+  reliability: ReliabilityService;
 }
 
 /** Wires every service and route into the Core Service HTTP API. */
 export async function createNexusServer(ctx: NexusContext, extraRoutes: RouteModule[] = []): Promise<{ app: FastifyInstance; services: NexusServices }> {
   const gateway = new GatewayService(ctx);
   const apps = new AppManager(ctx, gateway);
+  const reliability = new ReliabilityService(ctx, apps);
   const backups = new BackupService(ctx, apps);
   const ai = new AiService(ctx, apps);
   const notifications = new NotificationService(ctx);
@@ -61,7 +64,7 @@ export async function createNexusServer(ctx: NexusContext, extraRoutes: RouteMod
   const privateNetwork = new PrivateNetworkService(ctx, gateway, apps);
   const databaseLinks = new DatabaseLinkService(ctx, privateNetwork);
   ctx.onStop(() => databaseLinks.stop());
-  const services = { gateway, apps, backups, ai, pipelines, notifications, imports, plugins, privateNetwork, databaseLinks };
+  const services = { gateway, apps, backups, ai, pipelines, notifications, imports, plugins, privateNetwork, databaseLinks, reliability };
   // What the assistant knows about pipelines, backups and notifications.
   ai.extraFacts.push(() =>
     pipelines.available
@@ -79,7 +82,7 @@ export async function createNexusServer(ctx: NexusContext, extraRoutes: RouteMod
   const app = await buildServer(ctx, [
     authRoutes,
     setupRoutes,
-    appRoutes(apps),
+    appRoutes(apps, reliability),
     dataRoutes,
     importRoutes(imports),
     pluginRoutes(plugins),
@@ -107,6 +110,7 @@ export async function startBackground(ctx: NexusContext, s: NexusServices): Prom
   if (!ctx.setupCompleted) return;
   await s.plugins.startEnabled();
   await s.apps.autostart();
+  s.reliability.start();
   s.apps.startAutoDeploy();
   void s.privateNetwork.resume().catch((e) => ctx.log.warn("private network could not resume", { err: e as Error }));
   void s.databaseLinks.resume().catch((e) => ctx.log.warn("database links could not resume", { err: e as Error }));
