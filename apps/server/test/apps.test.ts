@@ -87,6 +87,7 @@ beforeAll(async () => {
   project(join(home, "src", "TaxiOpsBackend"), {
     "package.json": JSON.stringify({ name: "taxiops-backend", version: "1.4.7", scripts: { start: "node server.js" }, dependencies: {} }),
     ".env.example": "DATABASE_URL=postgres://postgres:postgres@localhost:5432/taxiops\nJWT_SECRET=\nUPLOAD_DIR=./uploads\nSTRIPE_API_KEY=\n",
+    ".env": "DATABASE_URL=postgres://old:old@localhost:5432/old\nPORT=5000\nJWT_SECRET=do-not-import-managed-secrets\nSTRIPE_API_KEY=sk_test_from_env\n",
     "server.js": SERVER_JS.replace("VERSION", '"1.4.7"') + "\nfunction routes(app) { app.get('/health', () => {}); }\n",
   });
 }, 240_000);
@@ -104,6 +105,8 @@ describe("Add Application → deploy (primary scenario, dependency-free app)", (
     // DATABASE_URL, JWT_SECRET, UPLOAD_DIR, STRIPE_API_KEY, PORT (Nexus's own NEXUS_* variables aren't counted)
     expect(r.body.findings).toEqual(["Node.js backend", "PostgreSQL database", "File uploads", "5 settings"]);
     expect(r.body.settingsNeeded).toEqual([{ name: "STRIPE_API_KEY", required: false, secret: true, exampleValue: null }]);
+    expect(r.body.envFile).toEqual({ files: [".env"], settings: [{ name: "STRIPE_API_KEY", secret: true }] });
+    expect(JSON.stringify(r.body)).not.toContain("sk_test_from_env");
     expect(r.body.analysis.health).toMatchObject({ mode: "automatic", candidate: { path: "/health", evidence: "Node.js route in server.js" }, endpoint: null });
   });
 
@@ -114,7 +117,7 @@ describe("Add Application → deploy (primary scenario, dependency-free app)", (
       data: { mode: "new", databaseName: "TaxiOps" },
       access: "internet",
       domain: "taxiops.test.example",
-      settings: { STRIPE_API_KEY: "sk_test_from_deploy" },
+      importEnvFile: true,
     });
     expect(created.status).toBe(200);
     expect(created.body.appId).toBe("taxiops");
@@ -148,7 +151,9 @@ describe("Add Application → deploy (primary scenario, dependency-free app)", (
     expect(seen.jwtLength).toBeGreaterThanOrEqual(40); // generated secret
     expect(seen.uploadDirWritable).toBe(true); // persistent upload folder
     expect(seen.nexusToken).toBe(true);
-    expect(seen.stripe).toBe("sk_test_from_deploy"); // supplied before the first start
+    expect(seen.stripe).toBe("sk_test_from_env"); // imported before the first start
+    expect(seen.db).not.toContain("/old"); // Nexus-managed database settings are never overridden by .env
+    expect(ctx.vault.get("app:taxiops/env/JWT_SECRET")).not.toBe("do-not-import-managed-secrets");
     const pub = await get(gwPorts.httpPort, "taxiops.test.example");
     expect(JSON.parse(pub.body).version).toBe("1.4.7");
 

@@ -50,6 +50,7 @@ interface AnalysisResult {
   /** Settings › Domains › Base domain, if set: new apps get <app>.<base domain>. */
   baseDomain?: string | null;
   settingsNeeded: { name: string; required: boolean; secret: boolean; exampleValue: string | null }[];
+  envFile: { files: string[]; settings: { name: string; secret: boolean }[] };
   warnings: string[];
   existingDatabases: { id: string; name: string; provider?: string; transactions?: boolean }[];
   analysis: { components: unknown[] };
@@ -180,9 +181,11 @@ function FolderStep({ onAnalyzed }: { onAnalyzed: (path: string, result: Analysi
   );
 }
 
-function AnalysisStep({ analysis, name, setName, settings, setSetting, onBack, onNext }: { analysis: AnalysisResult; name: string; setName: (n: string) => void; settings: Record<string, string>; setSetting: (name: string, value: string) => void; onBack: () => void; onNext: () => void }) {
+function AnalysisStep({ analysis, name, setName, settings, setSetting, importEnvFile, setImportEnvFile, onBack, onNext }: { analysis: AnalysisResult; name: string; setName: (n: string) => void; settings: Record<string, string>; setSetting: (name: string, value: string) => void; importEnvFile: boolean; setImportEnvFile: (enabled: boolean) => void; onBack: () => void; onNext: () => void }) {
   const recognized = analysis.analysis.components.length > 0;
-  const requiredSettingsReady = analysis.settingsNeeded.every((item) => !item.required || !!settings[item.name]?.trim());
+  const importedNames = new Set(importEnvFile ? analysis.envFile.settings.map((item) => item.name) : []);
+  const manualSettings = analysis.settingsNeeded.filter((item) => !importedNames.has(item.name));
+  const requiredSettingsReady = analysis.settingsNeeded.every((item) => !item.required || importedNames.has(item.name) || !!settings[item.name]?.trim());
   return (
     <>
       <WizardHead title="Here’s what Nexus found" sub="Review the result. Technical setup will be handled automatically." />
@@ -196,7 +199,8 @@ function AnalysisStep({ analysis, name, setName, settings, setSetting, onBack, o
         <div className="finding-grid">
           {analysis.findings.map((finding) => <div className="finding" key={finding}><CheckCircle2 size={17} /> <span>{finding}</span></div>)}
         </div>
-        {analysis.settingsNeeded.length > 0 && <div className="notice" style={{ marginTop: 16 }}><div className="row"><KeyRound size={18} /><span><strong>Application settings</strong><br /><span className="small">Enter the required values before Nexus starts the application. Optional values can be added later.</span></span></div><div className="settings-form" style={{ marginTop: 14 }}>{analysis.settingsNeeded.map((item) => <label className="field" key={item.name}>{item.name}{item.required ? " (required)" : " (optional)"}<input className="input mono" type={item.secret ? "password" : "text"} autoComplete="off" value={settings[item.name] ?? ""} placeholder={item.exampleValue ?? ""} onChange={(e) => setSetting(item.name, e.target.value)} /></label>)}</div></div>}
+        {analysis.envFile.settings.length > 0 && <label className="toggle-row env-import-row" style={{ marginTop: 16 }}><input type="checkbox" checked={importEnvFile} onChange={(e) => setImportEnvFile(e.target.checked)} /><span><strong>Import {analysis.envFile.settings.length} setting{analysis.envFile.settings.length === 1 ? "" : "s"} from {analysis.envFile.files.join(" and ")}</strong><small>Nexus reads the values directly from the selected folder. Secrets are encrypted and their values are never sent to this page.</small><span className="env-setting-names">{analysis.envFile.settings.slice(0, 8).map((item) => <code key={item.name}>{item.name}</code>)}{analysis.envFile.settings.length > 8 && <code>+{analysis.envFile.settings.length - 8} more</code>}</span></span></label>}
+        {manualSettings.length > 0 && <div className="notice" style={{ marginTop: 16 }}><div className="row"><KeyRound size={18} /><span><strong>Application settings</strong><br /><span className="small">{importEnvFile ? "Only settings not supplied by the detected .env file are shown." : "Enter the required values before Nexus starts the application."} Optional values can be added later.</span></span></div><div className="settings-form" style={{ marginTop: 14 }}>{manualSettings.map((item) => <label className="field" key={item.name}>{item.name}{item.required ? " (required)" : " (optional)"}<input className="input mono" type={item.secret ? "password" : "text"} autoComplete="off" value={settings[item.name] ?? ""} placeholder={item.exampleValue ?? ""} onChange={(e) => setSetting(item.name, e.target.value)} /></label>)}</div></div>}
         {analysis.warnings.map((warning) => <div className="notice row" style={{ marginTop: 10 }} key={warning}><TriangleAlert size={18} />{warning}</div>)}
         <div className="wizard-actions"><button className="btn" onClick={onBack}><ArrowLeft size={16} /> Choose another folder</button><span className="spacer" /><button className="btn primary large" disabled={!recognized || !name.trim() || !requiredSettingsReady} onClick={onNext}>Continue <ArrowRight size={17} /></button></div>
       </Card>
@@ -320,6 +324,7 @@ export function AddApplication() {
   const [sourceDir, setSourceDir] = useState("");
   const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
   const [settings, setSettings] = useState<Record<string, string>>({});
+  const [importEnvFile, setImportEnvFile] = useState(false);
   const [name, setName] = useState("");
   const [data, setData] = useState<DataChoice>({ mode: "none" });
   const [access, setAccess] = useState<AccessMode>("private");
@@ -338,6 +343,7 @@ export function AddApplication() {
     setSourceDir(path);
     setAnalysis(found);
     setSettings({});
+    setImportEnvFile(found.envFile.settings.length > 0);
     setName(found.name);
     setData(found.database.required ? { mode: "new" } : { mode: "none" });
     setAccess(found.externalAccessRecommended ? "internet" : "private");
@@ -348,7 +354,7 @@ export function AddApplication() {
     setCreating(true);
     setCreateError(null);
     try {
-      const created = await post<{ appId: string; jobId: string }>("/apps", { sourceDir, name: name.trim(), data, access, domain: access === "private" ? null : domain, settings: Object.fromEntries(Object.entries(settings).filter(([, value]) => value.trim())) });
+      const created = await post<{ appId: string; jobId: string }>("/apps", { sourceDir, name: name.trim(), data, access, domain: access === "private" ? null : domain, importEnvFile, settings: Object.fromEntries(Object.entries(settings).filter(([, value]) => value.trim())) });
       setJob(created);
       setStage("deploy");
     } catch (e) {
@@ -361,7 +367,7 @@ export function AddApplication() {
       <div className="add-app-top"><button className="btn ghost" onClick={() => navigate(-1)}><ArrowLeft size={17} /> Exit</button><WizardSteps stage={stage} /><span className="wizard-top-spacer" /></div>
       <div className="add-app-content">
         {stage === "folder" && <FolderStep onAnalyzed={analyzed} />}
-        {stage === "analysis" && analysis && <AnalysisStep analysis={analysis} name={name} setName={setName} settings={settings} setSetting={(setting, value) => setSettings((current) => ({ ...current, [setting]: value }))} onBack={() => setStage("folder")} onNext={() => setStage("data")} />}
+        {stage === "analysis" && analysis && <AnalysisStep analysis={analysis} name={name} setName={setName} settings={settings} setSetting={(setting, value) => setSettings((current) => ({ ...current, [setting]: value }))} importEnvFile={importEnvFile} setImportEnvFile={setImportEnvFile} onBack={() => setStage("folder")} onNext={() => setStage("data")} />}
         {stage === "data" && analysis && <DataStep analysis={analysis} choice={data} setChoice={setData} onBack={() => setStage("analysis")} onNext={() => setStage("access")} />}
         {stage === "access" && analysis && <><AccessStep access={access} setAccess={setAccess} domain={domain} setDomain={setDomain} recommended={analysis.externalAccessRecommended} onBack={() => setStage("data")} onDeploy={() => void deploy()} deploying={creating} /><ErrorNote error={createError} /></>}
         {stage === "deploy" && job && <DeployStep {...job} onReady={ready} />}

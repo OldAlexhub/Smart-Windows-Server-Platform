@@ -85,6 +85,7 @@ export function appRoutes(apps: AppManager, reliability?: ReliabilityService): R
         settingsNeeded: a.env
           .filter((e) => !e.managed && (e.required || e.category === "secret"))
           .map((e) => ({ name: e.name, required: e.required, secret: e.category === "secret", exampleValue: e.exampleValue })),
+        envFile: apps.envFilePreview(path, a),
         warnings: a.warnings,
         existingDatabases:
           a.database.kind === "mongodb"
@@ -108,6 +109,7 @@ export function appRoutes(apps: AppManager, reliability?: ReliabilityService): R
           }),
           access: accessSchema,
           domain: z.string().max(253).nullable().optional(),
+          importEnvFile: z.boolean().optional(),
           settings: z.record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/), z.string().max(10_000)).optional(),
         })
         .parse(req.body);

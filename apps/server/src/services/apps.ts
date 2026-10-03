@@ -85,6 +85,8 @@ export interface CreateAppInput {
   data: { mode: DataMode; databaseName?: string; databaseId?: string; externalUrl?: string };
   access: AccessMode;
   domain?: string | null;
+  /** Import non-Nexus-managed values from .env files in sourceDir before the first start. */
+  importEnvFile?: boolean;
   settings?: Record<string, string>;
 }
 
@@ -145,6 +147,8 @@ const SWITCH_DRAIN_MS = 5_000;
 /** An app that ignores PORT fails like this when its fixed port is already taken. */
 const PORT_TAKEN = /EADDRINUSE|address already in use|Only one usage of each socket address/i;
 const secretKey = (appId: string, name: string) => `app:${appId}/env/${name}`;
+const ENV_FILES = [".env", ".env.local", ".env.production", ".env.production.local"] as const;
+const isSecretSetting = (name: string) => /SECRET|PASSWORD|TOKEN|KEY|CREDENTIAL|_URL$/.test(name);
 
 /** Converts pre-provenance analyses into an untrusted candidate. Existing apps self-correct live. */
 export function normalizeHealth(analysis: ProjectAnalysis): HealthMonitoring {
@@ -332,11 +336,12 @@ export class AppManager {
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, '{}', ?, 'running', ?, ?)`,
       [id, name, input.sourceDir, toJson(analysis), input.access, toJson(hosts), input.data.mode, analysis.database.kind === "mongodb" ? null : (input.data.databaseId ?? null), toJson(AUTO_RESOURCES), now, now],
     );
+    if (input.importEnvFile) this.importEnvFile(id);
     const allowedSettings = new Set(analysis.env.filter((item) => !item.managed).map((item) => item.name));
     for (const [setting, value] of Object.entries(input.settings ?? {})) {
       if (allowedSettings.has(setting) && value) this.setEnv(id, setting, value);
     }
-    this.ctx.audit.record({ actor: { type: "user", ...actor }, action: "app.create", target: { type: "app", id }, details: { source: input.sourceDir, access: input.access, data: input.data.mode } });
+    this.ctx.audit.record({ actor: { type: "user", ...actor }, action: "app.create", target: { type: "app", id }, details: { source: input.sourceDir, access: input.access, data: input.data.mode, importedEnvFile: !!input.importEnvFile } });
     const job = this.deploy(id, { data: input.data, first: true });
     return { appId: id, jobId: job.id };
   }
@@ -1062,7 +1067,7 @@ export class AppManager {
     const app = this.require(appId);
     if (!/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(name)) throw NexusError.invalid("Setting names use letters, numbers and underscores.");
     if (["PORT", "HOST"].includes(name)) throw NexusError.invalid("Nexus manages this setting automatically.");
-    const secret = /SECRET|PASSWORD|TOKEN|KEY|CREDENTIAL|_URL$/.test(name);
+    const secret = isSecretSetting(name);
     const env = { ...app.env };
     delete env[name];
     this.ctx.vault.delete(secretKey(appId, name));
@@ -1080,12 +1085,31 @@ export class AppManager {
    */
   envFile(appId: string): { files: string[]; settings: { name: string; alreadySet: boolean }[]; values: Map<string, string> } {
     const app = this.require(appId);
-    const files = [".env", ".env.production"].filter((f) => existsSync(join(app.sourceDir, f)));
-    const values = new Map<string, string>();
-    for (const f of files) for (const [k, v] of parseDotenv(readFileSync(join(app.sourceDir, f), "utf8"))) values.set(k, v);
-    for (const k of ["PORT", "HOST"]) values.delete(k);
+    const { files, values } = this.readEnvFiles(app.sourceDir, app.analysis);
     const has = (name: string) => name in app.env || this.ctx.vault.has(secretKey(appId, name));
     return { files, settings: [...values.keys()].map((name) => ({ name, alreadySet: has(name) })), values };
+  }
+
+  /** Names only for the deployment wizard; values remain inside the service process. */
+  envFilePreview(sourceDir: string, analysis: ProjectAnalysis): { files: string[]; settings: { name: string; secret: boolean }[] } {
+    const { files, values } = this.readEnvFiles(sourceDir, analysis);
+    return {
+      files,
+      settings: [...values].filter(([, value]) => !!value).map(([name]) => ({ name, secret: isSecretSetting(name) })),
+    };
+  }
+
+  private readEnvFiles(sourceDir: string, analysis: ProjectAnalysis): { files: string[]; values: Map<string, string> } {
+    const files = ENV_FILES.filter((file) => existsSync(join(sourceDir, file)));
+    const values = new Map<string, string>();
+    for (const file of files) {
+      for (const [name, value] of parseDotenv(readFileSync(join(sourceDir, file), "utf8"))) values.set(name, value);
+    }
+    const managed = new Set(analysis.env.filter((item) => item.managed).map((item) => item.name));
+    for (const name of [...values.keys()]) {
+      if (managed.has(name) || name.startsWith(BRAND.envPrefix) || name === "PORT" || name === "HOST") values.delete(name);
+    }
+    return { files: [...files], values };
   }
 
   /** Imports settings from the app's .env files (all, or the named ones). Returns what was imported. */
