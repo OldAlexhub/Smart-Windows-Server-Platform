@@ -171,6 +171,7 @@ export function appRoutes(apps: AppManager, reliability?: ReliabilityService): R
         settings: authorize(user, "app.configure", id) ? apps.envView(id, false) : [],
         activity: ctx.activity.list(10, id),
         reliability: reliability?.appSummary(id) ?? null,
+        deploymentJobId: apps.activeDeploymentJobId(id),
       };
     });
 

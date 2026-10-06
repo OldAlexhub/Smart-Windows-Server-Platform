@@ -52,6 +52,7 @@ interface AppDetailData extends AppSummary {
   settings: EnvSetting[];
   activity: ActivityItem[];
   reliability: AppReliabilitySummary | null;
+  deploymentJobId: string | null;
 }
 
 interface Deployment { id: string; version: string; status: string; createdAt: string; activatedAt: string | null; commit: string | null; error: string | null }
@@ -130,6 +131,7 @@ function RemoveAppButton({ app, small = false }: { app: AppDetailData; small?: b
 
 function Overview({ app, canOperate, canDeploy, canDelete, busy, act }: { app: AppDetailData; canOperate: boolean; canDeploy: boolean; canDelete: boolean; busy: string | null; act: (action: "start" | "stop" | "restart" | "deploy") => void }) {
   const memoryFraction = Math.min(1, app.memoryBytes / (1024 ** 3));
+  const transitioning = app.status === "deploying" || app.status === "starting";
   return (
     <div className="stack">
       {app.problem && <ProblemCard problem={app.problem} />}
@@ -160,8 +162,8 @@ function Overview({ app, canOperate, canDeploy, canDelete, busy, act }: { app: A
         </Card>
         <Card title="Controls" sub="Nexus restarts safely and watches for crash loops">
           <div className="control-buttons">
-            {app.status === "stopped" ? <button className="btn primary" disabled={!canOperate || !!busy} onClick={() => act("start")}><Play size={16} /> Start</button> : <><button className="btn" disabled={!canOperate || !!busy} onClick={() => act("restart")}><RefreshCw size={16} /> Restart</button><button className="btn" disabled={!canOperate || !!busy} onClick={() => act("stop")}><Square size={15} /> Stop</button></>}
-            <button className="btn" disabled={!canDeploy || !!busy} onClick={() => act("deploy")}><Code2 size={16} /> Deploy Latest</button>
+            {app.status === "stopped" ? <button className="btn primary" disabled={!canOperate || !!busy || transitioning} onClick={() => act("start")}><Play size={16} /> Start</button> : <><button className="btn" disabled={!canOperate || !!busy || transitioning} onClick={() => act("restart")}><RefreshCw size={16} /> Restart</button><button className="btn" disabled={!canOperate || !!busy || transitioning} onClick={() => act("stop")}><Square size={15} /> Stop</button></>}
+            <button className="btn" disabled={!canDeploy || !!busy || transitioning} onClick={() => act("deploy")}><Code2 size={16} /> Deploy Latest</button>
             {canDelete && <RemoveAppButton app={app} small />}
           </div>
           {!canOperate && <p className="small muted" style={{ marginTop: 12 }}>Your role can view this application but cannot start or stop it.</p>}
@@ -289,6 +291,10 @@ export function ApplicationDetail({ me }: { me: Me }) {
   const [jobId, setJobId] = useState<string | null>(null);
   const onJobDone = useCallback(() => { void reload(); }, [reload]);
   const can = useMemo(() => (p: AppPermission) => allowed(me, id, p), [me, id]);
+
+  useEffect(() => {
+    if (app?.deploymentJobId) setJobId((current) => current ?? app.deploymentJobId);
+  }, [app?.deploymentJobId]);
 
   async function act(action: "start" | "stop" | "restart" | "deploy") {
     setBusy(action); setActionError(null);

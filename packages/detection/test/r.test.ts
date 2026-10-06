@@ -9,6 +9,10 @@ describe("R Shiny applications", () => {
     expect(rPackagesInSource(`library(shiny)\nrequire("DT")\n# library(ignored)\nx <- dplyr::filter(df)\npacman::p_load(ggplot2, "leaflet")`)).toEqual(["DT", "dplyr", "ggplot2", "leaflet", "pacman", "shiny"]);
   });
 
+  it("doesn't mistake namespace-like text inside strings for R packages", () => {
+    expect(rPackagesInSource(`xml2::xml_find_all(doc, ".//w:t[not(ancestor::w:sdt)]")`)).toEqual(["xml2"]);
+  });
+
   it("reads renv.lock", () => {
     expect(parseRenvLock(JSON.stringify({ R: { Version: "4.4.1" }, Packages: { shiny: { Package: "shiny", Version: "1.9.1" } } }))).toEqual({ rVersion: "4.4.1", packages: { shiny: "1.9.1" } });
   });

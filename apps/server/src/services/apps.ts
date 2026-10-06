@@ -245,6 +245,7 @@ export class AppManager {
   }
 
   status(id: string): AppStatus {
+    if (this.activeDeploymentJobId(id)) return "deploying";
     const sup = this.supervisors.get(id);
     if (sup) return sup.status;
     const app = this.get(id);
@@ -360,8 +361,7 @@ export class AppManager {
       { key: "verify", label: "Testing everything" },
       { key: "backups", label: "Turning on backups" },
     ];
-    const running = this.deployJobs.get(appId);
-    if (running && this.ctx.jobs.get(running)?.status === "running") throw NexusError.conflict(`${app.name} is already being updated. Wait for that update to finish.`);
+    if (this.activeDeploymentJobId(appId)) throw NexusError.conflict(`${app.name} is already being updated. Wait for that update to finish.`);
     const job = this.ctx.jobs.start("deploy", `Deploying ${app.name}`, steps, (job) => this.runDeploy(appId, job, opts));
     this.deployJobs.set(appId, job.id);
     this.jobApps.set(job.id, appId);
@@ -371,6 +371,13 @@ export class AppManager {
   /** Which app a deploy job belongs to (so a deploy key only sees its own app's progress). */
   jobApp(jobId: string): string | null {
     return this.jobApps.get(jobId) ?? null;
+  }
+
+  /** Active deploy for an app, including one paused for an answer from the UI. */
+  activeDeploymentJobId(appId: string): string | null {
+    const id = this.deployJobs.get(appId);
+    const status = id ? this.ctx.jobs.get(id)?.status : undefined;
+    return status === "running" || status === "waiting_for_input" ? id! : null;
   }
 
   // ------------------------------------------------------------------ delivery (updates without downtime)
@@ -387,8 +394,7 @@ export class AppManager {
    */
   async uploadSource(appId: string, zipFile: string): Promise<{ jobId: string; files: number }> {
     const app = this.require(appId);
-    const running = this.deployJobs.get(appId);
-    if (running && this.ctx.jobs.get(running)?.status === "running") throw NexusError.conflict(`${app.name} is already being updated. Wait for that update to finish.`);
+    if (this.activeDeploymentJobId(appId)) throw NexusError.conflict(`${app.name} is already being updated. Wait for that update to finish.`);
     const appDir = this.ctx.deployments!.appDir(appId);
     const incoming = join(appDir, `incoming-${Date.now()}`);
     mkdirSync(incoming, { recursive: true });
@@ -452,7 +458,7 @@ export class AppManager {
       autoDeploy: this.autoDeployEnabled(appId),
       deployKey: { enabled: !!key, createdAt: key?.createdAt ?? null, url: `/api/v1/hooks/deploy/${appId}` },
       pendingChanges: pending,
-      updating: job && this.ctx.jobs.get(job)?.status === "running" ? job : null,
+      updating: this.activeDeploymentJobId(appId),
     };
   }
 
@@ -478,8 +484,7 @@ export class AppManager {
     for (const app of this.list()) {
       if (!this.autoDeployEnabled(app.id) || app.desiredState !== "running") continue;
       const current = this.ctx.deployments?.current(app.id);
-      const running = this.deployJobs.get(app.id);
-      if (!current || !existsSync(app.sourceDir) || (running && this.ctx.jobs.get(running)?.status === "running")) continue;
+      if (!current || !existsSync(app.sourceDir) || this.activeDeploymentJobId(app.id)) continue;
       const { changed, newestMs } = sourceChangesSince(app.sourceDir, new Date(current.createdAt));
       if (!changed.length || now - newestMs < AUTO_DEPLOY_QUIET_MS || (this.autoAttempted.get(app.id) ?? 0) >= newestMs) continue;
       this.autoAttempted.set(app.id, newestMs);
@@ -673,7 +678,7 @@ export class AppManager {
 
     this.ctx.activity.add("success", `${app.name} ${opts.first ? "deployed" : "updated"} successfully.`, appId);
     this.ctx.audit.record({ actor: { type: "system" }, action: "app.deploy", target: { type: "app", id: appId }, details: { release: release.versionLabel } });
-    return { appId, release: release.versionLabel, summary: this.summary(this.require(appId)), checks };
+    return { appId, release: release.versionLabel, summary: { ...this.summary(this.require(appId)), status: started }, checks };
   }
 
   // ------------------------------------------------------------------ run

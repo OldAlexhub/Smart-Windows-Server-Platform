@@ -29,7 +29,7 @@ import type { AccessMode, AppSummary, JobStep } from "@nexus/shared/contracts";
 import type { FriendlyProblem } from "@nexus/shared/errors";
 import { Card, ErrorNote, ProblemCard, Spinner, Status } from "../components/ui";
 import { ApiError, get, post } from "../lib/api";
-import { useJob } from "../lib/hooks";
+import { useJob, type JobView } from "../lib/hooks";
 
 type Stage = "folder" | "analysis" | "data" | "access" | "deploy" | "ready";
 
@@ -67,6 +67,17 @@ interface DeployResult {
   release: string;
   summary: AppSummary;
   checks: { label: string; ok: boolean; detail: string }[];
+}
+
+const PENDING_DEPLOY_KEY = "nexus:first-deployment";
+
+function savedDeployment(): { jobId: string; appId: string } | null {
+  try {
+    const value = JSON.parse(sessionStorage.getItem(PENDING_DEPLOY_KEY) ?? "null") as { jobId?: unknown; appId?: unknown } | null;
+    return typeof value?.jobId === "string" && typeof value.appId === "string" ? { jobId: value.jobId, appId: value.appId } : null;
+  } catch {
+    return null;
+  }
 }
 
 const stages: { key: Stage; label: string }[] = [
@@ -262,8 +273,7 @@ function JobStepView({ step }: { step: JobStep }) {
   return <div className={`deploy-step ${step.status}`}><span className="deploy-step-icon">{icon}</span><span><strong>{step.label}</strong>{step.detail && <span className="small secondary">{step.detail}</span>}</span></div>;
 }
 
-function DeployStep({ jobId, appId, onReady }: { jobId: string; appId: string; onReady: (result: DeployResult) => void }) {
-  const job = useJob(jobId);
+function DeployStep({ jobId, appId, job, onReady }: { jobId: string; appId: string; job: JobView | null; onReady: (result: DeployResult) => void }) {
   const [answering, setAnswering] = useState(false);
   const [error, setError] = useState<ApiError | null>(null);
 
@@ -281,7 +291,7 @@ function DeployStep({ jobId, appId, onReady }: { jobId: string; appId: string; o
 
   return (
     <>
-      <WizardHead title={job?.status === "failed" ? "Deployment needs attention" : "Setting up your application"} sub={job?.status === "waiting_for_input" ? "Nexus needs one answer to continue." : "You can leave this page; the server keeps working in the background."} />
+      <WizardHead title={job?.status === "failed" ? "Deployment needs attention" : "Setting up your application"} sub={job?.status === "waiting_for_input" ? "Nexus needs one answer to continue." : "Keep this screen open to follow each step. Nexus keeps working if the page reloads."} />
       <Card>
         {!job ? <div className="folder-loading"><Spinner label="Starting deployment…" /></div> : (
           <>
@@ -290,7 +300,7 @@ function DeployStep({ jobId, appId, onReady }: { jobId: string; appId: string; o
             {job.problem && <ProblemCard problem={job.problem} />}
             <ErrorNote error={error} />
             {job.log.length > 0 && <details className="deploy-log"><summary>Deployment details</summary><pre className="mono">{job.log.join("\n")}</pre></details>}
-            {job.status === "failed" && <div className="wizard-actions"><span className="spacer" /><Link to={`/apps/${appId}`} className="btn">Open Application</Link></div>}
+            {job.status === "failed" && <div className="wizard-actions"><span className="spacer" /><Link to={`/apps/${appId}`} className="btn" onClick={() => sessionStorage.removeItem(PENDING_DEPLOY_KEY)}>Open Application</Link></div>}
           </>
         )}
       </Card>
@@ -320,7 +330,8 @@ const hostLabel = (name: string) =>
 
 export function AddApplication() {
   const navigate = useNavigate();
-  const [stage, setStage] = useState<Stage>("folder");
+  const [job, setJob] = useState<{ jobId: string; appId: string } | null>(() => savedDeployment());
+  const [stage, setStage] = useState<Stage>(() => (job ? "deploy" : "folder"));
   const [sourceDir, setSourceDir] = useState("");
   const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
   const [settings, setSettings] = useState<Record<string, string>>({});
@@ -334,10 +345,21 @@ export function AddApplication() {
   const setDomain = (d: string) => setTypedDomain(d);
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<ApiError | null>(null);
-  const [job, setJob] = useState<{ jobId: string; appId: string } | null>(null);
   const [result, setResult] = useState<DeployResult | null>(null);
+  const deploymentJob = useJob(job?.jobId ?? null);
+  const deploymentInProgress = stage === "deploy" && deploymentJob?.status !== "failed" && deploymentJob?.status !== "succeeded";
 
-  const ready = useMemo(() => (r: DeployResult) => { setResult(r); setStage("ready"); }, []);
+  const ready = useMemo(() => (r: DeployResult) => { sessionStorage.removeItem(PENDING_DEPLOY_KEY); setResult(r); setStage("ready"); }, []);
+
+  useEffect(() => {
+    if (!deploymentInProgress) return;
+    const keepOpen = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", keepOpen);
+    return () => window.removeEventListener("beforeunload", keepOpen);
+  }, [deploymentInProgress]);
 
   function analyzed(path: string, found: AnalysisResult) {
     setSourceDir(path);
@@ -355,6 +377,7 @@ export function AddApplication() {
     setCreateError(null);
     try {
       const created = await post<{ appId: string; jobId: string }>("/apps", { sourceDir, name: name.trim(), data, access, domain: access === "private" ? null : domain, importEnvFile, settings: Object.fromEntries(Object.entries(settings).filter(([, value]) => value.trim())) });
+      sessionStorage.setItem(PENDING_DEPLOY_KEY, JSON.stringify(created));
       setJob(created);
       setStage("deploy");
     } catch (e) {
@@ -363,14 +386,14 @@ export function AddApplication() {
   }
 
   return (
-    <div className="add-app-page">
-      <div className="add-app-top"><button className="btn ghost" onClick={() => navigate(-1)}><ArrowLeft size={17} /> Exit</button><WizardSteps stage={stage} /><span className="wizard-top-spacer" /></div>
+    <div className={`add-app-page${deploymentInProgress ? " deployment-focus" : ""}`}>
+      <div className="add-app-top"><button className="btn ghost" disabled={deploymentInProgress} title={deploymentInProgress ? "Wait for deployment to finish" : undefined} onClick={() => { sessionStorage.removeItem(PENDING_DEPLOY_KEY); navigate(-1); }}><ArrowLeft size={17} /> {deploymentInProgress ? "Deployment in progress" : "Exit"}</button><WizardSteps stage={stage} /><span className="wizard-top-spacer" /></div>
       <div className="add-app-content">
         {stage === "folder" && <FolderStep onAnalyzed={analyzed} />}
         {stage === "analysis" && analysis && <AnalysisStep analysis={analysis} name={name} setName={setName} settings={settings} setSetting={(setting, value) => setSettings((current) => ({ ...current, [setting]: value }))} importEnvFile={importEnvFile} setImportEnvFile={setImportEnvFile} onBack={() => setStage("folder")} onNext={() => setStage("data")} />}
         {stage === "data" && analysis && <DataStep analysis={analysis} choice={data} setChoice={setData} onBack={() => setStage("analysis")} onNext={() => setStage("access")} />}
         {stage === "access" && analysis && <><AccessStep access={access} setAccess={setAccess} domain={domain} setDomain={setDomain} recommended={analysis.externalAccessRecommended} onBack={() => setStage("data")} onDeploy={() => void deploy()} deploying={creating} /><ErrorNote error={createError} /></>}
-        {stage === "deploy" && job && <DeployStep {...job} onReady={ready} />}
+        {stage === "deploy" && job && <DeployStep {...job} job={deploymentJob} onReady={ready} />}
         {stage === "ready" && result && <ReadyStep result={result} />}
       </div>
     </div>

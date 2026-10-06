@@ -214,10 +214,13 @@ describe("Add Application → deploy (primary scenario, dependency-free app)", (
     let job = await waitJob(created.body.jobId);
     expect(job.status).toBe("waiting_for_input");
     expect(job.question.prompt).toBe("We found two possible database configurations. Which one does Billing use for its own data?");
+    const deploying = await call("GET", "/api/v1/apps/billing");
+    expect(deploying.body).toMatchObject({ status: "deploying", deploymentJobId: created.body.jobId });
     const billing = job.question.choices.find((c: { value: string }) => c.value === "BILLING");
     await call("POST", `/api/v1/jobs/${job.id}/answer`, { questionId: job.question.id, value: billing.value });
     job = await waitJob(job.id);
     expect(job.status).toBe("succeeded");
+    expect((await call("GET", "/api/v1/apps/billing")).body.deploymentJobId).toBeNull();
     const seen = JSON.parse((await get(gwPorts.localPort, "billing.nexus.localhost")).body);
     expect(seen).toEqual({ host: "127.0.0.1", fleet: null });
   }, 300_000);

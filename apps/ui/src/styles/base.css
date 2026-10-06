@@ -750,6 +750,7 @@ table.data tr:hover td {
 
 /* ---------- add application wizard ---------- */
 .add-app-page { min-height: calc(100vh - 76px); }
+.add-app-page.deployment-focus { position: fixed; inset: 0; z-index: 40; overflow-y: auto; padding: 28px 36px 48px; background: var(--surface-sunken); }
 .add-app-top { display: grid; grid-template-columns: 100px 1fr 100px; align-items: center; margin-bottom: 24px; }
 .wizard-top-spacer { width: 100px; }
 .wizard-steps { display: flex; justify-content: center; align-items: flex-start; list-style: none; padding: 0; margin: 0; }
@@ -831,6 +832,7 @@ table.data tr:hover td {
 }
 @media (max-width: 600px) {
   .add-app-page { min-height: auto; }
+  .add-app-page.deployment-focus { padding: 20px 16px 40px; }
   .add-app-top { display: block; }
   .add-app-top > .btn { margin-bottom: 18px; }
   .wizard-steps { justify-content: space-between; }

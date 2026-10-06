@@ -20,13 +20,38 @@ function withoutComments(src: string): string {
     .join("\n");
 }
 
+/** Masks quoted text while preserving offsets, so `::` inside data such as XPath isn't R syntax. */
+function withoutStrings(src: string): string {
+  const chars = [...src];
+  let quote: string | null = null;
+  for (let i = 0; i < chars.length; i++) {
+    const c = chars[i]!;
+    if (!quote) {
+      if (c === '"' || c === "'") {
+        quote = c;
+        chars[i] = " ";
+      }
+    } else if (c === "\\") {
+      chars[i] = " ";
+      if (i + 1 < chars.length && chars[i + 1] !== "\n") chars[++i] = " ";
+    } else if (c === quote) {
+      quote = null;
+      chars[i] = " ";
+    } else if (c !== "\n") {
+      chars[i] = " ";
+    }
+  }
+  return chars.join("");
+}
+
 /** Packages used by library(), require(), requireNamespace(), pacman::p_load() and pkg::fn. */
 export function rPackagesInSource(source: string): string[] {
   const code = withoutComments(source);
+  const executableCode = withoutStrings(code);
   const names = new Set<string>();
   const name = "([A-Za-z][A-Za-z0-9.]*[A-Za-z0-9]|[A-Za-z])";
   for (const m of code.matchAll(new RegExp(`\\b(?:library|require|requireNamespace|loadNamespace)\\(\\s*["']?${name}["']?`, "g"))) names.add(m[1]!);
-  for (const m of code.matchAll(new RegExp(`\\b${name}:::?[A-Za-z._]`, "g"))) names.add(m[1]!);
+  for (const m of executableCode.matchAll(new RegExp(`\\b${name}:::?[A-Za-z._]`, "g"))) names.add(m[1]!);
   for (const m of code.matchAll(/\bp_load\(([^)]*)\)/g)) {
     for (const p of m[1]!.split(",")) {
       const n = p.trim().replace(/^["']|["']$/g, "");
