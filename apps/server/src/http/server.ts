@@ -8,7 +8,16 @@ import { ZodError } from "zod";
 import { RateLimiter } from "@nexus/security";
 import { isNexusError, NexusError } from "@nexus/shared";
 import type { NexusContext } from "../context";
-import { clientIp, CSRF_HEADER, isRemoteRequest, requireRemoteAdminRequest, resolvePrincipal } from "./auth";
+import {
+  clientIp,
+  CSRF_HEADER,
+  isPrivateNetworkRequest,
+  isRemoteRequest,
+  requireRemoteAdminRequest,
+  resolvePrincipal,
+  SESSION_COOKIE,
+  setSessionCookie,
+} from "./auth";
 
 export type RouteModule = (app: FastifyInstance, ctx: NexusContext) => void | Promise<void>;
 
@@ -74,6 +83,16 @@ export async function buildServer(
       }
     }
     if (!req.principal && !PUBLIC.some((re) => re.test(path))) throw NexusError.unauthorized();
+  });
+
+  // Upgrade cookies issued by older releases and continually preserve the browser side of
+  // a valid management session. Explicit logout and other cookie-writing responses win.
+  app.addHook("onSend", async (req, reply, payload) => {
+    const token = req.cookies?.[SESSION_COOKIE];
+    if (token && req.principal?.kind === "user" && !reply.hasHeader("set-cookie")) {
+      setSessionCookie(reply, token, req.principal.session.expiresAt, req.remote && !isPrivateNetworkRequest(ctx, req));
+    }
+    return payload;
   });
 
   app.setErrorHandler((err, req, reply) => {

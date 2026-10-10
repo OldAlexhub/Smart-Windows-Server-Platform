@@ -6,6 +6,7 @@ import {
   base32Encode,
   checkPasswordStrength,
   hashPassword,
+  NON_EXPIRING_SESSION_DATE,
   otpauthUri,
   SecretVault,
   totpCode,
@@ -20,7 +21,7 @@ const STRONG = "correct horse battery staple";
 function setup(now = { t: Date.UTC(2027, 0, 1) }) {
   const store = StateStore.memory();
   const vault = SecretVault.withKey(store, randomBytes(32));
-  const users = new UserManager(store, vault, { now: () => now.t, sessionTtlMs: 8 * 3600e3, idleTimeoutMs: 3600e3 });
+  const users = new UserManager(store, vault, { now: () => now.t });
   return { store, vault, users, now };
 }
 
@@ -92,12 +93,12 @@ describe("UserManager", () => {
     }
     store.migrate(userMigrations);
     expect(
-      store.all<{ token_hash: string; audience: string }>(
-        "SELECT token_hash, audience FROM sessions ORDER BY token_hash",
+      store.all<{ token_hash: string; audience: string; expires_at: number }>(
+        "SELECT token_hash, audience, expires_at FROM sessions ORDER BY token_hash",
       ),
     ).toEqual([
-      { token_hash: "local", audience: "management" },
-      { token_hash: "remote", audience: "application" },
+      { token_hash: "local", audience: "management", expires_at: NON_EXPIRING_SESSION_DATE },
+      { token_hash: "remote", audience: "application", expires_at: NON_EXPIRING_SESSION_DATE },
     ]);
   });
 
@@ -140,23 +141,20 @@ describe("UserManager", () => {
     expect((await users.verifyCredentials("oper", STRONG)).status).toBe("invalid");
   });
 
-  it("sessions expire on idle timeout and absolute lifetime; tokens are stored hashed", async () => {
+  it("keeps sessions valid regardless of idle time or age, and stores tokens hashed", async () => {
     const { users, store, now } = setup();
     const u = await users.createUser({ username: "dev", displayName: "Dev", role: "developer", password: STRONG });
     const s = users.createSession(u.id, { method: "password", ip: "10.0.0.5" });
-    expect(store.get<{ token_hash: string }>("SELECT token_hash FROM sessions")!.token_hash).not.toBe(s.token);
+    const stored = store.get<{ token_hash: string; expires_at: number }>(
+      "SELECT token_hash, expires_at FROM sessions",
+    )!;
+    expect(stored.token_hash).not.toBe(s.token);
+    expect(stored.expires_at).toBe(NON_EXPIRING_SESSION_DATE);
     expect(users.validateSession(s.token)?.session.audience).toBe("management");
-    now.t += 30 * 60e3;
+    now.t += 2 * 24 * 60 * 60e3;
     expect(users.validateSession(s.token)?.user.id).toBe(u.id);
-    now.t += 61 * 60e3; // idle > 1h
-    expect(users.validateSession(s.token)).toBeNull();
-
-    const s2 = users.createSession(u.id, { method: "password" });
-    for (let i = 0; i < 9; i++) {
-      now.t += 55 * 60e3; // stay active but exceed 8h absolute
-      users.validateSession(s2.token);
-    }
-    expect(users.validateSession(s2.token)).toBeNull();
+    now.t += 50 * 365 * 24 * 60 * 60e3;
+    expect(users.validateSession(s.token)?.user.id).toBe(u.id);
   });
 
   it("password change revokes all sessions", async () => {

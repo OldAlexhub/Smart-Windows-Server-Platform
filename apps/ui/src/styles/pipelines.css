@@ -210,6 +210,9 @@ button.chip { cursor: pointer; }
 .data-ask-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: start; }
 .data-ask-form .sql-input { min-height: 90px; }
 .answer { display: flex; flex-direction: column; gap: 10px; border-top: 1px solid var(--border); padding-top: 12px; }
+.sql-write-warning { margin: 0; color: var(--warning); }
+.sql-statement-result { display: flex; flex-direction: column; gap: 6px; }
+.sql-statement-result > p { margin: 0; }
 .answer-summary { font-size: 15.5px; margin: 0; }
 .answer-table { max-height: 360px; }
 .answer-sql { margin: 8px 0; padding: 10px; border-radius: var(--radius-s); background: var(--surface-sunken); white-space: pre-wrap; font-size: 12.5px; }

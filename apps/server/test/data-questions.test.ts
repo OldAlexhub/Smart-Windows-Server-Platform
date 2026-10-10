@@ -97,18 +97,28 @@ describe("questions about your data", () => {
     script = [JSON.stringify({ sql: "with gone as (delete from trips returning *) select count(*) from gone" })];
     expect((await call("POST", `/api/v1/databases/${dbId}/ask`, { question: "Sneaky" })).status).toBe(400);
 
-    // Even SQL that gets past the checks runs read-only: the database itself refuses to change anything.
-    const lock = await call("POST", `/api/v1/databases/${dbId}/query`, { sql: "select * from trips for share" });
+    // Even model SQL that gets past the text checks runs read-only: the database itself refuses it.
+    script = [JSON.stringify({ sql: "select * from trips for share" }), JSON.stringify({ sql: "select * from trips for share" })];
+    const lock = await call("POST", `/api/v1/databases/${dbId}/ask`, { question: "Lock all trip rows" });
     expect(lock.status).toBe(400);
     expect(lock.body.error.message).toMatch(/read-only|can only read/i);
     expect(await tripCount()).toBe(5);
   });
 
-  it("runs SQL typed by a person with the same protection", async () => {
+  it("runs every kind of SQL typed by a person, including multiple statements and TRUNCATE", async () => {
     const r = await call("POST", `/api/v1/databases/${dbId}/query`, { sql: "select status, count(*) as trips from trips group by status order by status" });
     expect(r.body).toMatchObject({ question: null, rows: [{ status: "Cancelled", trips: 1 }, { status: "Completed", trips: 4 }], chart: { type: "bar", x: "status", y: ["trips"] } });
     const bad = await call("POST", `/api/v1/databases/${dbId}/query`, { sql: "select nope from trips" });
     expect(bad.body.error.message).toBe('column "nope" does not exist');
+
+    const write = await call("POST", `/api/v1/databases/${dbId}/query`, {
+      sql: "drop table if exists sql_console_test; create table sql_console_test (id int primary key, value text); insert into sql_console_test values (1, 'before'), (2, 'keep'); update sql_console_test set value = 'after' where id = 1 returning id, value; truncate table sql_console_test; select count(*)::int as remaining from sql_console_test",
+    });
+    expect(write.status).toBe(200);
+    expect(write.body.rows).toEqual([{ remaining: 0 }]);
+    expect(write.body.statements.map((statement: { command: string }) => statement.command)).toEqual(["DROP", "CREATE", "INSERT", "UPDATE", "TRUNCATE", "SELECT"]);
+    expect(write.body.statements[4]).toMatchObject({ command: "TRUNCATE", rowCount: null, rows: [] });
+    expect(await ctx.databases!.withOwner(dbId, async (c) => (await c.query("select count(*)::int as n from sql_console_test")).rows[0]!.n)).toBe(0);
   });
 
   it("stops questions that take too long", async () => {

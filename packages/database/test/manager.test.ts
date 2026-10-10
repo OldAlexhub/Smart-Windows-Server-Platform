@@ -82,6 +82,19 @@ describe.runIf(!!PG_BIN)("DatabaseManager (real PostgreSQL)", () => {
     expect(count).toBe(1);
   });
 
+  it("runs console SQL with database-owner access but never cluster-admin access", async () => {
+    const id = mgr.findByApp("taxiops")!.id;
+    await mgr.withSqlConsole(id, async (c) => {
+      const assumed = (await c.query("SELECT session_user, current_user")).rows[0];
+      expect(assumed.current_user).toBe("taxiops_owner");
+      expect(assumed.session_user).not.toBe(engine.superuser);
+      await c.query("RESET ROLE");
+      const reset = (await c.query("SELECT current_user, rolsuper, rolcreatedb, rolcreaterole FROM pg_roles WHERE rolname = current_user")).rows[0];
+      expect(reset).toMatchObject({ rolsuper: false, rolcreatedb: false, rolcreaterole: false });
+      await expect(c.query("CREATE DATABASE sql_console_escape")).rejects.toThrow(/permission denied/);
+    });
+  });
+
   it("lets a second app share a database with its own credentials", async () => {
     const id = mgr.findByApp("taxiops")!.id;
     const reports = await mgr.grantAppAccess(id, "reports");

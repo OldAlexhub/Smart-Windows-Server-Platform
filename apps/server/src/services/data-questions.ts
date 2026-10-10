@@ -21,6 +21,16 @@ export interface DataAnswer {
   /** The first query failed and the model corrected it. */
   repaired: boolean;
   durationMs: number;
+  /** Present for manually entered SQL. One item is returned for each executed statement. */
+  statements?: SqlStatementResult[];
+}
+
+export interface SqlStatementResult {
+  command: string;
+  rowCount: number | null;
+  columns: ResultColumn[];
+  rows: Record<string, unknown>[];
+  truncated: boolean;
 }
 
 const MAX_ROWS = 1000;
@@ -30,6 +40,11 @@ function friendlyDbError(message: string): string {
   if (/canceling statement due to statement timeout/i.test(message)) return "The question took too long to answer (over 15 seconds). Try asking about a shorter period or fewer things at once.";
   if (/read-only transaction/i.test(message)) return "That would change data, and questions can only read it.";
   if (/permission denied/i.test(message)) return "That needs data the question isn't allowed to read.";
+  return message.split("\n")[0]!;
+}
+
+function friendlySqlError(message: string): string {
+  if (/canceling statement due to statement timeout/i.test(message)) return "The SQL statement took too long (over 15 seconds).";
   return message.split("\n")[0]!;
 }
 
@@ -101,14 +116,29 @@ export class DataQuestionService {
     return { question: q, sql: plan.sql, explanation: plan.explanation, summary, ...result, chart, repaired, durationMs: Date.now() - started };
   }
 
-  /** Runs SQL someone typed, with exactly the same checks and read-only protection. */
+  /** Runs SQL entered by a person as the database's scoped owner (the route requires write access). */
   async query(databaseId: string, sql: string): Promise<DataAnswer> {
     const started = Date.now();
+    const input = sql.trim();
+    if (!input) throw NexusError.invalid("Please type a SQL statement.");
     try {
-      const result = await this.run(databaseId, sql);
-      return { question: null, sql: sql.trim(), explanation: "", summary: null, ...result, chart: chooseChart({ type: "none" }, result.columns, result.rows.length), repaired: false, durationMs: Date.now() - started };
+      const statements = await this.runOwnerSql(databaseId, input);
+      const result = [...statements].reverse().find((statement) => statement.columns.length > 0) ?? statements.at(-1) ?? { command: "EMPTY", rowCount: null, columns: [], rows: [], truncated: false };
+      return {
+        question: null,
+        sql: input,
+        explanation: "",
+        summary: null,
+        columns: result.columns,
+        rows: result.rows,
+        truncated: result.truncated,
+        chart: chooseChart({ type: "none" }, result.columns, result.rows.length),
+        repaired: false,
+        durationMs: Date.now() - started,
+        statements,
+      };
     } catch (e) {
-      if (e instanceof DbError) throw NexusError.invalid(friendlyDbError(e.message));
+      if (!(e instanceof NexusError)) throw NexusError.invalid(friendlySqlError((e as Error).message));
       throw e;
     }
   }
@@ -152,6 +182,54 @@ export class DataQuestionService {
       if (e instanceof NexusError) throw e;
       throw new DbError((e as Error).message);
     }
+  }
+
+  private async runOwnerSql(databaseId: string, input: string): Promise<SqlStatementResult[]> {
+    const { dbs } = this.need();
+    return dbs.withSqlConsole(databaseId, async (c) => {
+      type RawResult = {
+        command: string | null;
+        rowCount: number | null;
+        fields: { name: string; dataTypeID: number }[];
+        rows: Record<string, unknown>[];
+      };
+      // node-postgres returns an array when the input contains several statements.
+      const raw = (await c.query(input)) as unknown as RawResult | RawResult[];
+      const results = Array.isArray(raw) ? raw : [raw];
+      const oids = [...new Set(results.flatMap((result) => result.fields.map((field) => field.dataTypeID)))];
+      const types = oids.length
+        ? new Map(
+            (
+              await c.query<{ oid: number; typname: string }>(
+                "SELECT oid::int AS oid, typname FROM pg_catalog.pg_type WHERE oid = ANY($1)",
+                [oids],
+              )
+            ).rows.map((type) => [type.oid, type.typname]),
+          )
+        : new Map<number, string>();
+
+      return results.map((result) => {
+        const columns: ResultColumn[] = result.fields.map((field) => ({ name: field.name, kind: columnKind(types.get(field.dataTypeID) ?? "") }));
+        const dateOnly = new Set(result.fields.filter((field) => types.get(field.dataTypeID) === "date").map((field) => field.name));
+        const rows = result.rows.slice(0, MAX_ROWS).map((row) =>
+          Object.fromEntries(
+            columns.map((column) => {
+              const value = row[column.name];
+              if (value instanceof Date) return [column.name, dateOnly.has(column.name) ? value.toISOString().slice(0, 10) : value.toISOString()];
+              if (column.kind === "number" && typeof value === "string" && value.trim() !== "" && Number.isFinite(Number(value))) return [column.name, Number(value)];
+              return [column.name, value];
+            }),
+          ),
+        );
+        return {
+          command: result.command ?? "STATEMENT",
+          rowCount: result.rowCount,
+          columns,
+          rows,
+          truncated: result.rows.length > MAX_ROWS,
+        };
+      });
+    });
   }
 
   private async summarize(model: QuestionModel, question: string, result: { columns: ResultColumn[]; rows: Record<string, unknown>[]; truncated: boolean }): Promise<string | null> {

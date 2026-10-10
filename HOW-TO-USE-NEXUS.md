@@ -267,9 +267,11 @@ If a value doesn't fit (like "hello" in a number column), Nexus stops, **changes
 3. Nexus answers with a **chart**, a **table** and a short sentence.
    - Hover over the chart to see exact numbers.
    - If there are several measures, switch between them.
-4. You can also choose **SQL** and type your own query.
+4. People with permission to change data can also choose **SQL** and run PostgreSQL statements. This includes
+   `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `CREATE`, `ALTER`, `DROP`, `TRUNCATE`, and multiple statements at once.
 
-Nexus can only **read** data here. It can never change or delete anything. (Needs the AI to be ready for plain-English questions; SQL always works.)
+Plain-English questions can only **read** data. The SQL tab has full write access to this one database, so back up
+important data and read a statement carefully before running it.
 
 ---
 

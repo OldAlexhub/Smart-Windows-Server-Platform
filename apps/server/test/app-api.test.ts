@@ -137,6 +137,7 @@ describe("gateway authorization", () => {
     expect(ok.headers.location).toBe("/dispatch");
     const cookie = String(ok.headers["set-cookie"]).split(";")[0]!;
     expect(String(ok.headers["set-cookie"])).toMatch(/HttpOnly/);
+    expect(String(ok.headers["set-cookie"])).toContain("Expires=Fri, 31 Dec 9999 23:59:59 GMT");
 
     const authorized = await app.inject({ url: `/api/v1/gateway/authorize?app=${taxi}&mode=user`, headers: { ...host, cookie } });
     expect(authorized.statusCode).toBe(200);

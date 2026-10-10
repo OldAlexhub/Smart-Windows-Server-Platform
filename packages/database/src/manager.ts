@@ -60,6 +60,8 @@ export interface ConnectionInfo {
 }
 
 const secretName = (dbId: string, appId: string) => `db:${dbId}/app:${appId}/password`;
+const sqlConsoleSecretName = (dbId: string) => `db:${dbId}/sql-console/password`;
+const sqlConsoleRole = (dbId: string) => `nexus_sql_${sqlIdentifier(dbId, 48)}`;
 
 /**
  * Provisions and manages per-application PostgreSQL databases.
@@ -285,12 +287,14 @@ export class DatabaseManager {
       const qi = (s: string) => admin.escapeIdentifier(s);
       await admin.query(`DROP DATABASE IF EXISTS ${qi(db.dbName)} WITH (FORCE)`);
       for (const a of access) await admin.query(`DROP ROLE IF EXISTS ${qi(a.login_role)}`);
+      await admin.query(`DROP ROLE IF EXISTS ${qi(sqlConsoleRole(databaseId))}`);
       await admin.query(`DROP ROLE IF EXISTS ${qi(db.readonlyRole)}`);
       await admin.query(`DROP ROLE IF EXISTS ${qi(db.ownerRole)}`);
     } finally {
       await admin.end();
     }
     for (const a of access) this.vault.delete(secretName(databaseId, a.app_id));
+    this.vault.delete(sqlConsoleSecretName(databaseId));
     this.store.run("DELETE FROM databases WHERE id = ?", [databaseId]);
   }
 
@@ -325,6 +329,51 @@ export class DatabaseManager {
       return await fn(c);
     } finally {
       await c.end();
+    }
+  }
+
+  /**
+   * Runs user-authored SQL through a dedicated, non-superuser login scoped to this database.
+   *
+   * Raw SQL must never run through `withOwner`: that connection authenticates as the Nexus
+   * cluster administrator before assuming the owner role, so a user statement such as RESET ROLE
+   * could otherwise regain cluster-wide privileges. This login is only a member of this one
+   * database's owner role. Its password is kept in the vault and reset before every connection so
+   * console SQL cannot make the management connection unusable by changing its own password.
+   */
+  async withSqlConsole<T>(databaseId: string, fn: (c: pg.Client) => Promise<T>): Promise<T> {
+    const db = this.require(databaseId);
+    const role = sqlConsoleRole(databaseId);
+    const password = this.vault.get(sqlConsoleSecretName(databaseId)) ?? generateDbPassword();
+    const admin = await this.engine.adminClient();
+    try {
+      const qi = (s: string) => admin.escapeIdentifier(s);
+      const exists = (await admin.query("SELECT 1 FROM pg_roles WHERE rolname = $1", [role])).rowCount;
+      await admin.query(
+        `${exists ? "ALTER" : "CREATE"} ROLE ${qi(role)} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION CONNECTION LIMIT 5 PASSWORD ${admin.escapeLiteral(password)}`,
+      );
+      await admin.query(`GRANT ${qi(db.ownerRole)} TO ${qi(role)}`);
+      await admin.query(`ALTER ROLE ${qi(role)} IN DATABASE ${qi(db.dbName)} SET role = ${admin.escapeLiteral(db.ownerRole)}`);
+    } finally {
+      await admin.end();
+    }
+    this.vault.set(sqlConsoleSecretName(databaseId), password, "system");
+
+    const c = new pg.Client({
+      host: "127.0.0.1",
+      port: this.engine.port,
+      database: db.dbName,
+      user: role,
+      password,
+      connectionTimeoutMillis: 5000,
+      application_name: "nexus-sql-console",
+      options: "-c statement_timeout=15000",
+    });
+    try {
+      await c.connect();
+      return await fn(c);
+    } finally {
+      await c.end().catch(() => {});
     }
   }
 

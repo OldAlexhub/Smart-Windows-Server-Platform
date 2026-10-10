@@ -135,7 +135,7 @@ Legend: `[x]` done & verified · `[ ]` not started · `[~]` in progress
 - 0.4 — shared: Result, NexusError + FriendlyProblem model, structured logger with sinks, ids/slug/sqlIdentifier, formatting, domain contracts; 10/10 tests, tsc clean.
 - 0.5 — packages/state: StateStore (node:sqlite, WAL, FK), namespaced migrations with rollback, nested savepoint transactions, SettingsRepo; 6 tests passing (16 total), tsc clean.
 - 1.1 — SecretVault: AES-256-GCM sealed boxes with name-bound AAD, DPAPI-wrapped master key file, scopes, versioning, recovery key, HKDF sub-keys; 11 tests incl. live DPAPI on this machine.
-- 1.2 — UserManager: scrypt hashing, strength policy, owner bootstrap, hashed session tokens w/ idle+absolute expiry, TOTP (RFC 6238 vectors) with replay protection, recovery codes, per-app roles; 16 new tests (27 security).
+- 1.2 — UserManager: scrypt hashing, strength policy, owner bootstrap, persistent hashed session tokens with explicit revocation, TOTP (RFC 6238 vectors) with replay protection, recovery codes, per-app roles; 16 new tests (27 security).
 - 1.3 — rbac.ts: permission catalogue, 6 global roles, per-app role grants (John example), server-settings switch, owner-only actions, visibleAppIds; 9 tests (36 security).
 - 1.4 — guard.ts: token-bucket RateLimiter, persisted LoginGuard (per-account + per-IP lockout, exponential escalation, loopback exempt), suspicious sign-in signals/risk level; 5 tests (41 security).
 - 1.5 — AuditLog: append-only (SQLite triggers), SHA-256 hash chain with verify() tamper detection, secret redaction, filtered queries; 4 tests (45 security).

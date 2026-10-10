@@ -75,9 +75,12 @@ describe("HTTP security", () => {
     const setCookie = String(res.headers["set-cookie"]);
     expect(setCookie).toMatch(/HttpOnly/);
     expect(setCookie).toMatch(/SameSite=Strict/);
+    expect(setCookie).toContain("Expires=Fri, 31 Dec 9999 23:59:59 GMT");
     const me = await app.inject({ url: "/api/v1/auth/me", headers: { cookie: cookieOf(res) } });
     expect(me.json()).toMatchObject({ user: { role: "owner" }, remote: false });
     expect(me.json().permissions).toContain("server.recovery_key");
+    // Authenticated requests refresh cookies from older releases to the non-expiring date.
+    expect(String(me.headers["set-cookie"])).toContain("Expires=Fri, 31 Dec 9999 23:59:59 GMT");
   });
 
   it("the local token never works from outside", async () => {
@@ -96,6 +99,14 @@ describe("HTTP security", () => {
     expect(
       (await app.inject({ method: "POST", url: "/api/v1/test/echo", headers: { cookie, ...CSRF } })).statusCode,
     ).toBe(200);
+  });
+
+  it("still ends a session when the user explicitly signs out", async () => {
+    const cookie = await localLogin();
+    const logout = await app.inject({ method: "POST", url: "/api/v1/auth/logout", headers: { cookie, ...CSRF } });
+    expect(logout.statusCode).toBe(200);
+    expect(String(logout.headers["set-cookie"])).toMatch(/Expires=Thu, 01 Jan 1970|Max-Age=0/);
+    expect((await app.inject({ url: "/api/v1/auth/me", headers: { cookie } })).statusCode).toBe(401);
   });
 
   it("local sessions can't be replayed through the gateway", async () => {

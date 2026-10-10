@@ -51,7 +51,18 @@ export const userMigrations: Migration[] = [
     UPDATE sessions SET audience = 'management' WHERE remote = 0;
     CREATE INDEX sessions_remote_audience ON sessions(remote, audience);`,
   },
+  {
+    id: "security/004_non_expiring_sessions",
+    description: "Keep signed-in sessions until they are explicitly revoked",
+    // Keep the existing column for upgrade compatibility. Newer code treats it as a
+    // persistence marker rather than a deadline, and this preserves sessions created
+    // by older releases that have not already been removed.
+    up: `UPDATE sessions SET expires_at = 253402300799999;`,
+  },
 ];
+
+/** Far-future timestamp used for persistent HTTP cookies (9999-12-31T23:59:59.999Z). */
+export const NON_EXPIRING_SESSION_DATE = 253_402_300_799_999;
 
 export interface User {
   id: string;
@@ -97,10 +108,6 @@ export type LoginResult =
   { status: "ok"; user: User } | { status: "mfa_required"; userId: string } | { status: "invalid" };
 
 export interface UserManagerOptions {
-  /** Absolute session lifetime. */
-  sessionTtlMs?: number;
-  /** Sessions idle longer than this expire. */
-  idleTimeoutMs?: number;
   now?: () => number;
 }
 
@@ -108,8 +115,6 @@ const hashToken = (t: string) => createHash("sha256").update(t).digest("hex");
 const mfaSecretName = (userId: string) => `user:${userId}/totp`;
 
 export class UserManager {
-  private readonly sessionTtlMs: number;
-  private readonly idleTimeoutMs: number;
   private readonly now: () => number;
 
   constructor(
@@ -118,8 +123,6 @@ export class UserManager {
     options: UserManagerOptions = {},
   ) {
     store.migrate(userMigrations);
-    this.sessionTtlMs = options.sessionTtlMs ?? 12 * 60 * 60 * 1000;
-    this.idleTimeoutMs = options.idleTimeoutMs ?? 60 * 60 * 1000;
     this.now = options.now ?? Date.now;
   }
 
@@ -342,7 +345,7 @@ export class UserManager {
     if (user.disabled) throw NexusError.forbidden("This account is disabled.");
     const token = randomBytes(32).toString("base64url");
     const now = this.now();
-    const expiresAt = now + this.sessionTtlMs;
+    const expiresAt = NON_EXPIRING_SESSION_DATE;
     this.store.run(
       `INSERT INTO sessions (token_hash, user_id, created_at, last_seen_at, expires_at, ip, user_agent, remote, method, audience)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -362,7 +365,7 @@ export class UserManager {
     return { token, expiresAt };
   }
 
-  /** Returns the session's user if the token is valid; slides the idle timeout. */
+  /** Returns the session's user if the token is valid. Sessions end only through explicit revocation. */
   validateSession(token: string): { user: User; session: Session } | null {
     if (!token) return null;
     const h = hashToken(token);
@@ -377,10 +380,6 @@ export class UserManager {
     }>("SELECT * FROM sessions WHERE token_hash = ?", [h]);
     if (!row) return null;
     const now = this.now();
-    if (now >= row.expires_at || now - row.last_seen_at > this.idleTimeoutMs) {
-      this.store.run("DELETE FROM sessions WHERE token_hash = ?", [h]);
-      return null;
-    }
     const user = this.get(row.user_id);
     if (!user || user.disabled) return null;
     this.store.run("UPDATE sessions SET last_seen_at = ? WHERE token_hash = ?", [now, h]);
@@ -408,10 +407,6 @@ export class UserManager {
   /** Revokes remote control-center sessions without signing people out of published applications. */
   revokeRemoteManagementSessions(): number {
     return this.store.run("DELETE FROM sessions WHERE remote = 1 AND audience = 'management'").changes;
-  }
-
-  purgeExpiredSessions(): number {
-    return this.store.run("DELETE FROM sessions WHERE expires_at <= ?", [this.now()]).changes;
   }
 
   // ---------------- helpers ----------------
