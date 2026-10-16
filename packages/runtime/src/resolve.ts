@@ -48,6 +48,15 @@ export function resolveCommand(command: string, args: string[], ctx: RuntimeCont
   const rBin = ctx.rscript ? dirname(ctx.rscript) : null;
   const pathDirs = [...(venvScripts ? [venvScripts] : []), ...(rBin ? [rBin] : []), nodeDir];
   const env: Record<string, string> = {};
+  if (venvScripts && ctx.venvDir) {
+    const python = join(venvScripts, process.platform === "win32" ? "python.exe" : "python");
+    Object.assign(env, {
+      VIRTUAL_ENV: ctx.venvDir,
+      PYTHON: python,
+      PYTHON_EXECUTABLE: python,
+      NEXUS_PYTHON: python,
+    });
+  }
 
   switch (command) {
     case "node":
@@ -58,7 +67,12 @@ export function resolveCommand(command: string, args: string[], ctx: RuntimeCont
     case "yarn":
     case "pnpm":
       // Via corepack, bundled with Node.
-      return { executable: ctx.nodeExe, args: [join(nodeDir, "node_modules", "corepack", "dist", `${command}.js`), ...args], pathDirs, env };
+      return {
+        executable: ctx.nodeExe,
+        args: [join(nodeDir, "node_modules", "corepack", "dist", `${command}.js`), ...args],
+        pathDirs,
+        env,
+      };
     case "python":
     case "pip": {
       if (!venvScripts) throw new Error("This Python application has no environment yet.");
@@ -72,7 +86,12 @@ export function resolveCommand(command: string, args: string[], ctx: RuntimeCont
       // (renv's would switch to a library that isn't there).
       Object.assign(env, { R_LIBS_USER: ctx.rLibDir, R_LIBS: ctx.rLibDir, R_LIBS_SITE: ctx.rLibDir });
       const flags = ["--no-save", "--no-restore", "--no-init-file"];
-      return { executable: ctx.rscript, args: command === "Rscript" ? [...flags, ...args] : [...flags, "-e", rPackagesScript(args)], pathDirs, env };
+      return {
+        executable: ctx.rscript,
+        args: command === "Rscript" ? [...flags, ...args] : [...flags, "-e", rPackagesScript(args)],
+        pathDirs,
+        env,
+      };
     }
     default:
       throw new Error(`Unsupported command "${command}".`);

@@ -485,7 +485,7 @@ const FRAMEWORK_DEFAULT_PORT: Record<string, number> = {
 };
 
 export function detectPort(snap: ProjectSnapshot, a: ProjectAnalysis): void {
-  const main = a.components.find((c) => c.role === "backend" || c.role === "fullstack");
+  const main = a.components.find((c) => !c.auxiliary && (c.role === "backend" || c.role === "fullstack"));
   if (!main) return;
   // Servers Nexus launches with an explicit port flag always honour it.
   if (main.start?.args.some((x) => x.includes("{PORT}")) || main.role === "fullstack") {
@@ -562,7 +562,7 @@ function codeWithoutComments(text: string, python: boolean): string {
 }
 
 export function detectHealth(snap: ProjectSnapshot, a: ProjectAnalysis): void {
-  const main = a.components.find((c) => c.role === "backend" || c.role === "fullstack");
+  const main = a.components.find((c) => !c.auxiliary && (c.role === "backend" || c.role === "fullstack"));
   if (!main) return;
   const found = new Map<string, string>();
   for (const f of snap.sources(main.path)) {
@@ -602,7 +602,7 @@ const MIGRATE_SCRIPTS = ["migrate", "db:migrate", "migrate:latest", "migration:r
 
 export function detectMigrations(snap: ProjectSnapshot, a: ProjectAnalysis): void {
   if (!a.database.required) return;
-  const main = a.components.find((c) => c.role === "backend" || c.role === "fullstack");
+  const main = a.components.find((c) => !c.auxiliary && (c.role === "backend" || c.role === "fullstack"));
   if (!main) return;
   const p = main.path;
   const deps = new Set(main.dependencies);

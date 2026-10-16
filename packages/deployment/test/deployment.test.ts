@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { analyzeProject } from "@nexus/detection";
 import { StateStore } from "@nexus/state";
-import { defaultRuntimeContext } from "@nexus/runtime";
+import { buildIsolatedEnv, defaultRuntimeContext, resolveCommand, runToCompletion } from "@nexus/runtime";
 import {
   choosePython,
   DeploymentManager,
@@ -33,7 +33,15 @@ function write(root: string, files: Record<string, string>) {
 }
 function manager(store = StateStore.memory(), keep = 5) {
   const base = tmp();
-  return { mgr: new DeploymentManager(store, { appsRoot: join(base, "Apps"), runtime: defaultRuntimeContext(), keepReleases: keep }), base, store };
+  return {
+    mgr: new DeploymentManager(store, {
+      appsRoot: join(base, "Apps"),
+      runtime: defaultRuntimeContext(),
+      keepReleases: keep,
+    }),
+    base,
+    store,
+  };
 }
 
 describe("Python runtime selection", () => {
@@ -86,7 +94,12 @@ describe("DeploymentManager", () => {
   it("creates an isolated Node release: copies code, never copies secrets/deps/.git, installs", async () => {
     const src = join(tmp(), "TaxiOpsBackend");
     write(src, {
-      "package.json": JSON.stringify({ name: "taxiops-backend", version: "1.4.8", scripts: { start: "node server.js" }, dependencies: {} }), // no deps → offline install
+      "package.json": JSON.stringify({
+        name: "taxiops-backend",
+        version: "1.4.8",
+        scripts: { start: "node server.js" },
+        dependencies: {},
+      }), // no deps → offline install
       "server.js": "require('http').createServer().listen(process.env.PORT)",
       ".env": "DATABASE_URL=postgres://prod:SECRET@x/db",
       ".env.example": "DATABASE_URL=",
@@ -97,7 +110,12 @@ describe("DeploymentManager", () => {
     const analysis = analyzeProject(src);
     const { mgr } = manager();
     const steps: string[] = [];
-    const d = await mgr.prepareRelease({ appId: "a1", slug: "taxiops", analysis, onStep: (k, s) => steps.push(`${k}:${s}`) });
+    const d = await mgr.prepareRelease({
+      appId: "a1",
+      slug: "taxiops",
+      analysis,
+      onStep: (k, s) => steps.push(`${k}:${s}`),
+    });
 
     expect(d).toMatchObject({ status: "ready", seq: 1, versionLabel: "v1.4.8", sourceCommit: "0123456" });
     expect(existsSync(join(d.releaseDir, "server.js"))).toBe(true);
@@ -107,7 +125,14 @@ describe("DeploymentManager", () => {
     expect(existsSync(join(d.releaseDir, "node_modules", "express"))).toBe(false);
     expect(existsSync(join(d.releaseDir, "package-lock.json"))).toBe(true); // npm install ran
     expect(existsSync(join(src, "package-lock.json"))).toBe(false); // source untouched
-    expect(steps).toEqual(["copy:running", "copy:done", "runtime:skipped", "install:running", "install:done", "build:skipped"]);
+    expect(steps).toEqual([
+      "copy:running",
+      "copy:done",
+      "runtime:skipped",
+      "install:running",
+      "install:done",
+      "build:skipped",
+    ]);
   }, 120_000);
 
   it("creates a private Python environment per release", async () => {
@@ -117,14 +142,57 @@ describe("DeploymentManager", () => {
     const d = await mgr.prepareRelease({ appId: "p1", slug: "reports", analysis: analyzeProject(src) });
     expect(d.status).toBe("ready");
     expect(d.pythonVersion).toMatch(/^3\.\d+$/);
-    expect(existsSync(join(d.venvDir!, "Scripts", "python.exe")) || existsSync(join(d.venvDir!, "bin", "python"))).toBe(true);
+    expect(existsSync(join(d.venvDir!, "Scripts", "python.exe")) || existsSync(join(d.venvDir!, "bin", "python"))).toBe(
+      true,
+    );
     expect(mgr.runtimeFor(d).venvDir).toBe(d.venvDir);
+  }, 180_000);
+
+  it("deploys a Node app with Python helpers and lets Node run the managed interpreter", async () => {
+    const src = join(tmp(), "mixed-ai");
+    write(src, {
+      "package.json": JSON.stringify({ name: "mixed-ai", scripts: { start: "node server.js" }, dependencies: {} }),
+      "server.js": `const {spawnSync}=require("node:child_process");const r=spawnSync(process.env.NEXUS_PYTHON,["ai/infer.py"],{encoding:"utf8"});process.stdout.write(r.stdout||"");process.stderr.write(r.stderr||"");process.exit(r.status??1);`,
+      "ai/infer.py": `import json, sys\nprint(json.dumps({"python": sys.executable, "ok": True}))\n`,
+      "ai/requirements.txt": "# standard library only\n",
+    });
+    const analysis = analyzeProject(src);
+    const { mgr } = manager();
+    const commands: string[] = [];
+    const d = await mgr.prepareRelease({
+      appId: "mixed1",
+      slug: "mixed-ai",
+      analysis,
+      onLine: (stream, line) => stream === "system" && line.startsWith("> ") && commands.push(line),
+    });
+
+    expect(d.pythonVersion).toMatch(/^3\.\d+$/);
+    expect(commands.map((line) => line.split(" ")[1])).toEqual(["pip", "npm"]);
+
+    const runtime = mgr.runtimeFor(d);
+    const command = resolveCommand("node", ["server.js"], runtime);
+    const env = buildIsolatedEnv({
+      homeDir: mgr.homeDir("mixed-ai"),
+      pathDirs: command.pathDirs,
+      appEnv: command.env,
+      port: 0,
+    });
+    const result = await runToCompletion({
+      executable: command.executable,
+      args: command.args,
+      cwd: d.releaseDir,
+      env,
+      timeoutMs: 30_000,
+    });
+    expect(result.code).toBe(0);
+    expect(result.tail.join("\n")).toContain('"ok": true');
+    expect(result.tail.join("\n")).toContain(".venv");
   }, 180_000);
 
   it("records a failed build with a friendly message", async () => {
     const src = join(tmp(), "broken");
     write(src, {
-      "package.json": JSON.stringify({ scripts: { start: "node dist/index.js", build: "node -e \"process.exit(2)\"" } }),
+      "package.json": JSON.stringify({ scripts: { start: "node dist/index.js", build: 'node -e "process.exit(2)"' } }),
       "tsconfig.json": "{}",
     });
     const analysis = analyzeProject(src);
@@ -164,14 +232,19 @@ describe("DeploymentManager", () => {
   });
 
   it("explains install failures in plain language", () => {
-    expect(explainInstallFailure(["npm ERR! code ENOTFOUND", "npm ERR! request to https://registry.npmjs.org failed"])).toMatch(/internet connection/);
+    expect(
+      explainInstallFailure(["npm ERR! code ENOTFOUND", "npm ERR! request to https://registry.npmjs.org failed"]),
+    ).toMatch(/internet connection/);
     expect(explainInstallFailure(["ERROR: No matching distribution found for torch==9"])).toMatch(/Python packages/);
     expect(explainInstallFailure(["gyp ERR! find VS"])).toMatch(/build tools/);
   });
 
   it("reads git commits from packed refs", () => {
     const root = tmp();
-    write(root, { ".git/HEAD": "ref: refs/heads/main\n", ".git/packed-refs": "# pack-refs\nabcdef1234567890abcdef1234567890abcdef12 refs/heads/main\n" });
+    write(root, {
+      ".git/HEAD": "ref: refs/heads/main\n",
+      ".git/packed-refs": "# pack-refs\nabcdef1234567890abcdef1234567890abcdef12 refs/heads/main\n",
+    });
     expect(readGitCommit(root)).toBe("abcdef1");
     expect(readGitCommit(tmp())).toBeNull();
   });

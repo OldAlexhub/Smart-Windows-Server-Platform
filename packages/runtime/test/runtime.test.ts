@@ -39,8 +39,13 @@ http.createServer((q, s) => s.end(JSON.stringify({ port: process.env.PORT, host:
   .listen(Number(process.env.PORT), process.env.HOST, () => console.log("listening on " + process.env.PORT));
 `;
 
-
-function config(release: string, home: string, file: string, port: number, extra: Partial<AppProcessConfig> = {}): AppProcessConfig {
+function config(
+  release: string,
+  home: string,
+  file: string,
+  port: number,
+  extra: Partial<AppProcessConfig> = {},
+): AppProcessConfig {
   const ctx = defaultRuntimeContext();
   const cmd = resolveCommand("node", [file], ctx);
   return {
@@ -48,7 +53,12 @@ function config(release: string, home: string, file: string, port: number, extra
     cwd: release,
     executable: cmd.executable,
     args: cmd.args,
-    env: buildIsolatedEnv({ homeDir: home, pathDirs: cmd.pathDirs, appEnv: { DATABASE_URL: "postgres://app@127.0.0.1/db" }, port }),
+    env: buildIsolatedEnv({
+      homeDir: home,
+      pathDirs: cmd.pathDirs,
+      appEnv: { DATABASE_URL: "postgres://app@127.0.0.1/db" },
+      port,
+    }),
     port,
     resources: { cpuLimitPercent: "auto", memoryLimitMb: "auto", priority: "normal" },
     startupTimeoutMs: 15_000,
@@ -64,7 +74,12 @@ describe("buildIsolatedEnv", () => {
       pathDirs: ["C:\\Nexus\\runtime\\node"],
       appEnv: { PORT: "80", HOST: "0.0.0.0", JWT_SECRET: "x", NODE_ENV: "staging" },
       port: 43127,
-      hostEnv: { SystemRoot: "C:\\Windows", AWS_SECRET_ACCESS_KEY: "leak", PATH: "C:\\evil", USERPROFILE: "C:\\Users\\admin" },
+      hostEnv: {
+        SystemRoot: "C:\\Windows",
+        AWS_SECRET_ACCESS_KEY: "leak",
+        PATH: "C:\\evil",
+        USERPROFILE: "C:\\Users\\admin",
+      },
     });
     expect(env.AWS_SECRET_ACCESS_KEY).toBeUndefined();
     expect(env.PATH!.startsWith("C:\\Nexus\\runtime\\node;C:\\Windows\\System32")).toBe(true);
@@ -94,10 +109,24 @@ describe("resolveCommand", () => {
     expect(r.args.slice(1)).toEqual(["run", "start"]);
   });
   it("uses the app's venv for python and pip", () => {
-    const r = resolveCommand("pip", ["install", "-r", "requirements.txt"], { nodeExe: process.execPath, venvDir: "C:\\Nexus\\Apps\\x\\venv" });
+    const r = resolveCommand("pip", ["install", "-r", "requirements.txt"], {
+      nodeExe: process.execPath,
+      venvDir: "C:\\Nexus\\Apps\\x\\venv",
+    });
     expect(r.executable).toMatch(/venv[\\/]Scripts[\\/]python\.exe$|venv[\\/]bin[\\/]python$/);
     expect(r.args).toEqual(["-m", "pip", "install", "-r", "requirements.txt"]);
     expect(() => resolveCommand("python", [], { nodeExe: process.execPath })).toThrow(/no environment/);
+  });
+  it("makes a managed Python interpreter available to Node subprocesses", () => {
+    const venvDir = "C:\\Nexus\\Apps\\mixed\\.venv";
+    const r = resolveCommand("node", ["server.js"], { nodeExe: process.execPath, venvDir });
+    expect(r.pathDirs[0]).toBe(join(venvDir, process.platform === "win32" ? "Scripts" : "bin"));
+    expect(r.env).toMatchObject({
+      VIRTUAL_ENV: venvDir,
+      PYTHON: r.env.NEXUS_PYTHON,
+      PYTHON_EXECUTABLE: r.env.NEXUS_PYTHON,
+    });
+    expect(r.env.NEXUS_PYTHON).toMatch(/python(?:\.exe)?$/);
   });
 });
 
@@ -153,7 +182,10 @@ describe("AppSupervisor with ProcessIsolationProvider (real processes)", () => {
 
   it("flags an app that never opens its port", async () => {
     const { release, home } = workspace({ "silent.js": `setInterval(()=>{}, 1000)` });
-    const sup = new AppSupervisor(config(release, home, "silent.js", await freePort(), { startupTimeoutMs: 1500 }), new ProcessIsolationProvider());
+    const sup = new AppSupervisor(
+      config(release, home, "silent.js", await freePort(), { startupTimeoutMs: 1500 }),
+      new ProcessIsolationProvider(),
+    );
     sups.push(sup);
     expect(await sup.start()).toBe("needs_attention");
     expect(sup.detail).toMatch(/not answering/);
@@ -163,7 +195,10 @@ describe("AppSupervisor with ProcessIsolationProvider (real processes)", () => {
     const { release, home } = workspace({
       "slow.js": `const http=require("http");setTimeout(()=>http.createServer((q,s)=>s.end("ready")).listen(Number(process.env.PORT),"127.0.0.1"),20000);`,
     });
-    const sup = new AppSupervisor(config(release, home, "slow.js", await freePort(), { startupTimeoutMs: 30_000 }), new ProcessIsolationProvider());
+    const sup = new AppSupervisor(
+      config(release, home, "slow.js", await freePort(), { startupTimeoutMs: 30_000 }),
+      new ProcessIsolationProvider(),
+    );
     sups.push(sup);
     const started = Date.now();
     expect(await sup.start()).toBe("running");

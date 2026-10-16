@@ -13,6 +13,8 @@ export interface CommandSpec {
 
 export interface ComponentAnalysis {
   role: ComponentRole;
+  /** A supporting runtime used by the primary app process (for example Node calling Python). */
+  auxiliary?: boolean;
   /** Relative path from the project root ("" for root). */
   path: string;
   runtime: RuntimeKind;
@@ -66,7 +68,8 @@ export interface DatabaseRequirement {
 }
 
 export interface MigrationInfo {
-  tool: "prisma" | "knex" | "sequelize" | "typeorm" | "drizzle" | "alembic" | "django" | "node-pg-migrate" | "sql-files";
+  tool:
+    "prisma" | "knex" | "sequelize" | "typeorm" | "drizzle" | "alembic" | "django" | "node-pg-migrate" | "sql-files";
   command: CommandSpec | null;
   /** Safe to run automatically on an empty database. */
   autoRunnable: boolean;

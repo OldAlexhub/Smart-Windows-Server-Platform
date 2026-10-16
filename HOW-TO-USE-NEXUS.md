@@ -195,6 +195,8 @@ There are four ways to send an update. They all work this way.
 3. **Upload a zip.** On the **Deployments** tab, press **Upload New Version (.zip)** and choose a zip of your project folder. Leave out `node_modules` and `.venv`, because Nexus installs those itself. You can zip the folder itself or the folder around it; both work.
 4. **Push it from your laptop.** On the **Deployments** tab, press **Create Deploy Key**. Nexus shows the key once, with a ready-made command to copy. Run it in your project folder on your laptop (with WireGuard on) and the new version goes live. **Turn Off** stops the key working.
 
+Node.js applications may include Python helpers for AI, machine learning, media processing, or other jobs. Keep a `requirements.txt`, `pyproject.toml`, or `Pipfile` beside the Python code. Nexus creates a private Python environment, installs it before the Node dependencies/build run, puts its interpreter on the application's `PATH`, and exposes its absolute path as `NEXUS_PYTHON`, `PYTHON`, and `PYTHON_EXECUTABLE`. Node code can call `python`, or preferably `process.env.NEXUS_PYTHON`, without relying on a user's system Python installation.
+
 Every version is kept. If something is wrong, open **Deployments**, pick an older version and press **Roll Back** (also without going offline).
 
 ### Remove (delete) an app

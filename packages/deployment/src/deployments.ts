@@ -69,7 +69,27 @@ export type StepCallback = (key: string, status: StepStatus, detail?: string) =>
 export type LineCallback = (stream: "stdout" | "stderr" | "system", line: string) => void;
 
 /** Never copied into a release: dependencies, VCS data, caches and real secrets. */
-const EXCLUDE_DIRS = new Set(["node_modules", ".git", ".hg", ".svn", ".venv", "venv", "env", "__pycache__", ".next", ".nuxt", ".turbo", ".cache", ".pytest_cache", ".mypy_cache", "coverage", ".idea", ".vscode", ".Rproj.user", "rsconnect"]);
+const EXCLUDE_DIRS = new Set([
+  "node_modules",
+  ".git",
+  ".hg",
+  ".svn",
+  ".venv",
+  "venv",
+  "env",
+  "__pycache__",
+  ".next",
+  ".nuxt",
+  ".turbo",
+  ".cache",
+  ".pytest_cache",
+  ".mypy_cache",
+  "coverage",
+  ".idea",
+  ".vscode",
+  ".Rproj.user",
+  "rsconnect",
+]);
 const EXCLUDE_FILE = /^\.env(\.(local|development|production|test))?(\.local)?$/i;
 /** renv's installed packages: machine-specific, and Nexus installs its own library per release. */
 const EXCLUDE_REL = /(^|\/)renv\/(library|staging|local|sandbox)(\/|$)/;
@@ -78,7 +98,11 @@ const EXCLUDE_REL = /(^|\/)renv\/(library|staging|local|sandbox)(\/|$)/;
  * Files in an app's folder changed after `since` — only those a new release would copy (the same
  * exclusions as a deploy), so "Update" only appears when redeploying would actually change something.
  */
-export function sourceChangesSince(root: string, since: Date, maxFiles = 50_000): { changed: string[]; scanned: number; newestMs: number } {
+export function sourceChangesSince(
+  root: string,
+  since: Date,
+  maxFiles = 50_000,
+): { changed: string[]; scanned: number; newestMs: number } {
   const changed: string[] = [];
   let scanned = 0;
   let newestMs = 0;
@@ -173,23 +197,32 @@ export class DeploymentManager {
     const onStep = input.onStep ?? (() => {});
     const onLine = input.onLine ?? (() => {});
     const started = Date.now();
-    const seq = (this.store.get<{ n: number | null }>("SELECT MAX(seq) AS n FROM deployments WHERE app_id = ?", [appId])?.n ?? 0) + 1;
+    const seq =
+      (this.store.get<{ n: number | null }>("SELECT MAX(seq) AS n FROM deployments WHERE app_id = ?", [appId])?.n ??
+        0) + 1;
     const releaseDir = join(this.appDir(slug), "releases", String(seq));
     const id = newId();
     this.store.run(
       `INSERT INTO deployments (id, app_id, seq, version_label, source_dir, source_commit, status, release_dir, created_at)
        VALUES (?, ?, ?, ?, ?, ?, 'building', ?, ?)`,
-      [id, appId, seq, versionLabel(analysis, seq), analysis.root, readGitCommit(analysis.root), releaseDir, new Date().toISOString()],
+      [
+        id,
+        appId,
+        seq,
+        versionLabel(analysis, seq),
+        analysis.root,
+        readGitCommit(analysis.root),
+        releaseDir,
+        new Date().toISOString(),
+      ],
     );
 
     const fail = (step: string, message: string, tail: string[] = []): never => {
       onStep(step, "failed", message);
-      this.store.run("UPDATE deployments SET status = 'failed', error = ?, finished_at = ?, duration_ms = ? WHERE id = ?", [
-        message,
-        new Date().toISOString(),
-        Date.now() - started,
-        id,
-      ]);
+      this.store.run(
+        "UPDATE deployments SET status = 'failed', error = ?, finished_at = ?, duration_ms = ? WHERE id = ?",
+        [message, new Date().toISOString(), Date.now() - started, id],
+      );
       throw new NexusError("infrastructure", message, {
         problem: {
           title: `${analysis.name} could not be prepared`,
@@ -226,9 +259,19 @@ export class DeploymentManager {
       mkdirSync(rLibDir, { recursive: true });
       ctx.rscript = r.rscript;
       ctx.rLibDir = rLibDir;
-      this.store.run("UPDATE deployments SET r_script = ?, r_lib_dir = ?, r_version = ? WHERE id = ?", [r.rscript, rLibDir, r.version, id]);
-      const differs = rComponent.runtimeVersion && !r.version.startsWith(rComponent.runtimeVersion.split(".").slice(0, 2).join("."));
-      if (differs) onLine("system", `This app was written for R ${rComponent.runtimeVersion}; R ${r.version} is the closest installed version.`);
+      this.store.run("UPDATE deployments SET r_script = ?, r_lib_dir = ?, r_version = ? WHERE id = ?", [
+        r.rscript,
+        rLibDir,
+        r.version,
+        id,
+      ]);
+      const differs =
+        rComponent.runtimeVersion && !r.version.startsWith(rComponent.runtimeVersion.split(".").slice(0, 2).join("."));
+      if (differs)
+        onLine(
+          "system",
+          `This app was written for R ${rComponent.runtimeVersion}; R ${r.version} is the closest installed version.`,
+        );
       onStep("runtime", "done", `R ${r.version}`);
     } else if (pyComponent) {
       onStep("runtime", "running", "Preparing Python");
@@ -246,10 +289,15 @@ export class DeploymentManager {
         onLine: onLine,
         timeoutMs: 180_000,
       });
-      if (r.code !== 0) fail("runtime", "Nexus could not create a private Python environment for this application.", r.tail);
+      if (r.code !== 0)
+        fail("runtime", "Nexus could not create a private Python environment for this application.", r.tail);
       pythonVersion = py.version;
       ctx.venvDir = venvDir;
-      this.store.run("UPDATE deployments SET venv_dir = ?, python_version = ? WHERE id = ?", [venvDir, pythonVersion, id]);
+      this.store.run("UPDATE deployments SET venv_dir = ?, python_version = ? WHERE id = ?", [
+        venvDir,
+        pythonVersion,
+        id,
+      ]);
       onStep("runtime", "done", `Python ${py.version}`);
     } else {
       onStep("runtime", "skipped");
@@ -257,7 +305,10 @@ export class DeploymentManager {
 
     // 3. Install dependencies, 4. Build
     for (const phase of ["install", "build"] as const) {
-      const work = analysis.components.filter((c) => (phase === "install" ? c.install : c.build));
+      const work = analysis.components
+        .filter((c) => (phase === "install" ? c.install : c.build))
+        // Prepare helper runtimes before npm lifecycle/build scripts can invoke them.
+        .sort((a, b) => (phase === "install" ? installPriority(a) - installPriority(b) : 0));
       if (work.length === 0) {
         onStep(phase, "skipped");
         continue;
@@ -268,7 +319,11 @@ export class DeploymentManager {
         const cwd = c.path ? join(releaseDir, ...c.path.split("/")) : releaseDir;
         const resolved = resolveCommand(spec.command, spec.args, ctx);
         onLine("system", `> ${spec.command} ${spec.args.join(" ")}${c.path ? `  (in ${c.path})` : ""}`);
-        const env = this.toolEnv(slug, resolved.pathDirs, { ...(spec.env ?? {}), ...resolved.env, ...phaseEnv(c, phase) });
+        const env = this.toolEnv(slug, resolved.pathDirs, {
+          ...(spec.env ?? {}),
+          ...resolved.env,
+          ...phaseEnv(c, phase),
+        });
         const r = await runToCompletion({
           executable: resolved.executable,
           args: resolved.args,
@@ -278,11 +333,22 @@ export class DeploymentManager {
           timeoutMs: this.opts.installTimeoutMs ?? 20 * 60_000,
         });
         if (r.code !== 0) {
-          fail(phase, phase === "install" ? explainInstallFailure(r.tail) : "The application's build step failed.", r.tail);
+          fail(
+            phase,
+            phase === "install" ? explainInstallFailure(r.tail) : "The application's build step failed.",
+            r.tail,
+          );
         }
         if (phase === "install" && c.extraPackages?.length) {
           const extra = resolveCommand("pip", ["install", ...c.extraPackages], ctx);
-          const x = await runToCompletion({ executable: extra.executable, args: extra.args, cwd, env, onLine, timeoutMs: 600_000 });
+          const x = await runToCompletion({
+            executable: extra.executable,
+            args: extra.args,
+            cwd,
+            env,
+            onLine,
+            timeoutMs: 600_000,
+          });
           if (x.code !== 0) fail(phase, explainInstallFailure(x.tail), x.tail);
         }
       }
@@ -301,10 +367,17 @@ export class DeploymentManager {
   /** Marks a release as the one running; the previous active release becomes a rollback target. */
   activate(id: string): DeploymentRecord {
     const d = this.require(id);
-    if (!["ready", "superseded", "active"].includes(d.status)) throw NexusError.conflict("This version can't be started.");
+    if (!["ready", "superseded", "active"].includes(d.status))
+      throw NexusError.conflict("This version can't be started.");
     this.store.transaction(() => {
-      this.store.run("UPDATE deployments SET status = 'superseded' WHERE app_id = ? AND status = 'active' AND id != ?", [d.appId, id]);
-      this.store.run("UPDATE deployments SET status = 'active', activated_at = ? WHERE id = ?", [new Date().toISOString(), id]);
+      this.store.run(
+        "UPDATE deployments SET status = 'superseded' WHERE app_id = ? AND status = 'active' AND id != ?",
+        [d.appId, id],
+      );
+      this.store.run("UPDATE deployments SET status = 'active', activated_at = ? WHERE id = ?", [
+        new Date().toISOString(),
+        id,
+      ]);
     });
     this.prune(d.appId);
     return this.require(id);
@@ -341,9 +414,14 @@ export class DeploymentManager {
    */
   rollbackCheck(targetId: string): { allowed: boolean; requiresConfirmation: boolean; reason: string | null } {
     const target = this.require(targetId);
-    if (target.status === "active") return { allowed: false, requiresConfirmation: false, reason: "This version is already running." };
+    if (target.status === "active")
+      return { allowed: false, requiresConfirmation: false, reason: "This version is already running." };
     if (!["superseded", "ready"].includes(target.status) || !existsSync(target.releaseDir)) {
-      return { allowed: false, requiresConfirmation: false, reason: "This version is no longer available on this computer." };
+      return {
+        allowed: false,
+        requiresConfirmation: false,
+        reason: "This version is no longer available on this computer.",
+      };
     }
     const newerWithMigrations = this.store.get<{ n: number }>(
       "SELECT COUNT(*) AS n FROM deployments WHERE app_id = ? AND seq > ? AND ran_migrations = 1",
@@ -353,7 +431,8 @@ export class DeploymentManager {
       return {
         allowed: true,
         requiresConfirmation: true,
-        reason: "A newer version changed the database structure. The older version may not work with it. Consider restoring the database backup from that time as well.",
+        reason:
+          "A newer version changed the database structure. The older version may not work with it. Consider restoring the database backup from that time as well.",
       };
     }
     return { allowed: true, requiresConfirmation: false, reason: null };
@@ -399,6 +478,12 @@ export class DeploymentManager {
   }
 }
 
+function installPriority(c: ComponentAnalysis): number {
+  if (c.runtime === "python") return 0;
+  if (c.runtime === "r") return 1;
+  return 2;
+}
+
 function phaseCommand(c: ComponentAnalysis, phase: "install" | "build"): CommandSpec {
   const spec = (phase === "install" ? c.install : c.build)!;
   // Builds need devDependencies even though apps run with NODE_ENV=production.
@@ -409,23 +494,32 @@ function phaseCommand(c: ComponentAnalysis, phase: "install" | "build"): Command
 }
 
 function phaseEnv(c: ComponentAnalysis, phase: "install" | "build"): Record<string, string> {
-  if (phase === "install" && (c.packageManager === "yarn" || c.packageManager === "pnpm")) return { NODE_ENV: "development" };
+  if (phase === "install" && (c.packageManager === "yarn" || c.packageManager === "pnpm"))
+    return { NODE_ENV: "development" };
   return {};
 }
 
 export function explainInstallFailure(tail: string[]): string {
   const text = tail.join("\n");
-  if (/ENOTFOUND|EAI_AGAIN|getaddrinfo|Temporary failure in name resolution|Failed to establish a new connection|NewConnectionError/i.test(text)) {
+  if (
+    /ENOTFOUND|EAI_AGAIN|getaddrinfo|Temporary failure in name resolution|Failed to establish a new connection|NewConnectionError/i.test(
+      text,
+    )
+  ) {
     return "Installing the application's components needs an internet connection, and none was available.";
   }
-  if (/ENOSPC|No space left on device|not enough space/i.test(text)) return "The drive is full, so the application's components could not be installed.";
+  if (/ENOSPC|No space left on device|not enough space/i.test(text))
+    return "The drive is full, so the application's components could not be installed.";
   if (/EINTEGRITY|lockfile.*(out of date|not in sync)|npm ci.*can only install/i.test(text)) {
     return "The application's package-lock.json doesn't match package.json. Update the lock file in the project, then deploy again.";
   }
   const rMissing = text.match(/NEXUS_MISSING:\s*([^\n]+)/)?.[1]?.trim();
   if (rMissing) {
     const many = rMissing.includes(",");
-    return `The R package${many ? "s" : ""} ${rMissing.split(",").map((m) => `"${m}"`).join(", ")} couldn't be installed. ${many ? "They may" : "It may"} not be on CRAN for this version of R.`;
+    return `The R package${many ? "s" : ""} ${rMissing
+      .split(",")
+      .map((m) => `"${m}"`)
+      .join(", ")} couldn't be installed. ${many ? "They may" : "It may"} not be on CRAN for this version of R.`;
   }
   if (/cannot open URL|unable to access index|InternetOpenUrl failed/i.test(text)) {
     return "Installing the application's R packages needs an internet connection, and CRAN couldn't be reached.";

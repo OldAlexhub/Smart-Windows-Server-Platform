@@ -12,11 +12,22 @@ export function requirementName(line: string): string | null {
 }
 
 export function parseRequirements(text: string): string[] {
-  return [...new Set(text.split(/\r?\n/).map(requirementName).filter((x): x is string => !!x))];
+  return [
+    ...new Set(
+      text
+        .split(/\r?\n/)
+        .map(requirementName)
+        .filter((x): x is string => !!x),
+    ),
+  ];
 }
 
 /** Minimal pyproject reader: PEP 621 dependencies, Poetry dependencies, requires-python. */
-export function parsePyproject(text: string): { dependencies: string[]; requiresPython: string | null; name: string | null } {
+export function parsePyproject(text: string): {
+  dependencies: string[];
+  requiresPython: string | null;
+  name: string | null;
+} {
   const deps = new Set<string>();
   const arr = text.match(/^\s*dependencies\s*=\s*\[([\s\S]*?)\]/m);
   if (arr) {
@@ -59,14 +70,25 @@ interface AppObject {
 }
 
 /** "src/app/main.py" (component "") → module "app.main", PYTHONPATH "src" when src-layout has no package. */
-function moduleFor(snap: ProjectSnapshot, componentPath: string, file: string): { module: string; pythonPath: string | null } {
+function moduleFor(
+  snap: ProjectSnapshot,
+  componentPath: string,
+  file: string,
+): { module: string; pythonPath: string | null } {
   let rel = componentPath ? file.slice(componentPath.length + 1) : file;
   let pythonPath: string | null = null;
   if (rel.startsWith("src/") && !snap.has(joinRel(componentPath, "src/__init__.py"))) {
     rel = rel.slice(4);
     pythonPath = "src";
   }
-  return { module: rel.replace(/\.py$/, "").replace(/\/__init__$/, "").split("/").join("."), pythonPath };
+  return {
+    module: rel
+      .replace(/\.py$/, "")
+      .replace(/\/__init__$/, "")
+      .split("/")
+      .join("."),
+    pythonPath,
+  };
 }
 
 function findAppObject(snap: ProjectSnapshot, path: string, ctor: RegExp, factoryName: RegExp): AppObject | null {
@@ -116,19 +138,51 @@ function findStreamlitEntry(snap: ProjectSnapshot, path: string): string | null 
 
 // ------------------------------------------------------------------ analyzer
 
-export function analyzePythonComponent(snap: ProjectSnapshot, path: string): ComponentAnalysis | null {
-  const req = snap.read(joinRel(path, "requirements.txt"));
+export function analyzePythonComponent(
+  snap: ProjectSnapshot,
+  path: string,
+  options: { auxiliary?: boolean } = {},
+): ComponentAnalysis | null {
+  const prefix = path ? `${path}/` : "";
+  const reqPath = snap.files
+    .filter((file) => {
+      if (!file.startsWith(prefix)) return false;
+      const relative = file.slice(prefix.length);
+      return !relative.includes("/") && /^requirements(?:[._-][^/]*)?\.txt$/i.test(relative);
+    })
+    .sort((a, b) => {
+      const rank = (file: string) => {
+        const name = file.split("/").pop()!.toLowerCase();
+        if (name === "requirements.txt") return 0;
+        if (/^requirements[._-](prod|production)\.txt$/.test(name)) return 1;
+        return 2;
+      };
+      return rank(a) - rank(b) || a.localeCompare(b);
+    })[0];
+  const req = reqPath ? snap.read(reqPath) : null;
   const pyproject = snap.read(joinRel(path, "pyproject.toml"));
   const pipfile = snap.read(joinRel(path, "Pipfile"));
   const managePy = snap.has(joinRel(path, "manage.py"));
   const pySources = snap.sources(path, /\.py$/i);
   if (req === null && pyproject === null && pipfile === null && !managePy && pySources.length === 0) return null;
   // A folder with a stray .py next to a package.json is a Node project.
-  if (req === null && pyproject === null && pipfile === null && !managePy && snap.has(joinRel(path, "package.json"))) return null;
+  if (
+    req === null &&
+    pyproject === null &&
+    pipfile === null &&
+    !managePy &&
+    snap.has(joinRel(path, "package.json")) &&
+    !options.auxiliary
+  )
+    return null;
 
   const pp = pyproject ? parsePyproject(pyproject) : null;
   const dependencies = [
-    ...new Set([...(req ? parseRequirements(req) : []), ...(pp?.dependencies ?? []), ...(pipfile ? parsePipfile(pipfile) : [])]),
+    ...new Set([
+      ...(req ? parseRequirements(req) : []),
+      ...(pp?.dependencies ?? []),
+      ...(pipfile ? parsePipfile(pipfile) : []),
+    ]),
   ];
   const has = (d: string) => dependencies.includes(d);
 
@@ -141,14 +195,27 @@ export function analyzePythonComponent(snap: ProjectSnapshot, path: string): Com
         : "pip";
 
   let install: CommandSpec | null = null;
-  if (req !== null) install = { command: "pip", args: ["install", "-r", "requirements.txt"] };
-  else if (pyproject !== null && /\[build-system\]|\[tool\.poetry\]|\[project\]/.test(pyproject)) install = { command: "pip", args: ["install", "."] };
+  if (req !== null && reqPath) {
+    const reqName = path ? reqPath.slice(path.length + 1) : reqPath;
+    install = { command: "pip", args: ["install", "-r", reqName] };
+  } else if (pyproject !== null && /\[build-system\]|\[tool\.poetry\]|\[project\]/.test(pyproject))
+    install = { command: "pip", args: ["install", "."] };
   else if (dependencies.length) install = { command: "pip", args: ["install", ...dependencies] };
 
   const runtimeVersion =
     pp?.requiresPython ??
     snap.read(joinRel(path, ".python-version"))?.trim() ??
-    snap.read(joinRel(path, "runtime.txt"))?.trim().replace(/^python-/, "") ??
+    snap
+      .read(joinRel(path, "runtime.txt"))
+      ?.trim()
+      .replace(/^python-/, "") ??
+    (options.auxiliary && path ? snap.read(".python-version")?.trim() : null) ??
+    (options.auxiliary && path
+      ? snap
+          .read("runtime.txt")
+          ?.trim()
+          .replace(/^python-/, "")
+      : null) ??
     null;
 
   const base = {
@@ -162,6 +229,16 @@ export function analyzePythonComponent(snap: ProjectSnapshot, path: string): Com
     runtimeVersion,
     dependencies,
   };
+  if (options.auxiliary) {
+    return {
+      ...base,
+      role: "backend",
+      auxiliary: true,
+      framework: "Python helpers",
+      start: null,
+      entryFile: pySources[0] ? (path ? pySources[0].slice(path.length + 1) : pySources[0]) : null,
+    };
+  }
   const listen = ["--host", "127.0.0.1", "--port", "{PORT}"];
   const withPath = (spec: CommandSpec, pythonPath: string | null): CommandSpec =>
     pythonPath ? { ...spec, env: { PYTHONPATH: pythonPath } } : spec;
@@ -228,7 +305,13 @@ export function analyzePythonComponent(snap: ProjectSnapshot, path: string): Com
       role: "backend",
       framework: asgiFw,
       start: obj
-        ? withPath({ command: "python", args: ["-m", "uvicorn", `${obj.module}:${obj.attr}`, ...(obj.factory ? ["--factory"] : []), ...listen] }, obj.pythonPath)
+        ? withPath(
+            {
+              command: "python",
+              args: ["-m", "uvicorn", `${obj.module}:${obj.attr}`, ...(obj.factory ? ["--factory"] : []), ...listen],
+            },
+            obj.pythonPath,
+          )
         : null,
       entryFile: obj?.file ?? null,
       extraPackages: has("uvicorn") ? [] : ["uvicorn"],
@@ -246,7 +329,13 @@ export function analyzePythonComponent(snap: ProjectSnapshot, path: string): Com
         ? withPath(
             {
               command: "python",
-              args: ["-m", "waitress", "--listen=127.0.0.1:{PORT}", ...(obj.factory ? ["--call"] : []), `${obj.module}:${obj.attr}`],
+              args: [
+                "-m",
+                "waitress",
+                "--listen=127.0.0.1:{PORT}",
+                ...(obj.factory ? ["--call"] : []),
+                `${obj.module}:${obj.attr}`,
+              ],
             },
             obj.pythonPath,
           )

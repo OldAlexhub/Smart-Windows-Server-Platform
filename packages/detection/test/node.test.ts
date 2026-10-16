@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { analyzeProject } from "@nexus/detection";
+import { analyzeProject, primary } from "@nexus/detection";
 import { project } from "./helpers";
 
 describe("Node.js detection", () => {
@@ -49,7 +49,10 @@ describe("Node.js detection", () => {
     expect(a.components[0]).toMatchObject({ framework: "Koa", start: { command: "node", args: ["app.js"] } });
 
     const b = analyzeProject(project({ "package.json": { dependencies: { fastify: "5" } }, "src/server.js": "" }));
-    expect(b.components[0]).toMatchObject({ framework: "Fastify", start: { command: "node", args: ["src/server.js"] } });
+    expect(b.components[0]).toMatchObject({
+      framework: "Fastify",
+      start: { command: "node", args: ["src/server.js"] },
+    });
   });
 
   it("detects TypeScript backends with a build step", () => {
@@ -75,7 +78,10 @@ describe("Node.js detection", () => {
   it("detects Next.js as a full-stack app", () => {
     const a = analyzeProject(
       project({
-        "package.json": { scripts: { build: "next build", start: "next start" }, dependencies: { next: "15", react: "19" } },
+        "package.json": {
+          scripts: { build: "next build", start: "next start" },
+          dependencies: { next: "15", react: "19" },
+        },
       }),
     );
     expect(a.summary).toBe("Next.js application");
@@ -85,7 +91,11 @@ describe("Node.js detection", () => {
   it("detects a Vite React frontend and never runs its dev server", () => {
     const a = analyzeProject(
       project({
-        "package.json": { scripts: { dev: "vite", start: "vite", build: "vite build" }, dependencies: { react: "19" }, devDependencies: { vite: "6" } },
+        "package.json": {
+          scripts: { dev: "vite", start: "vite", build: "vite build" },
+          dependencies: { react: "19" },
+          devDependencies: { vite: "6" },
+        },
         "index.html": "<div id=root>",
       }),
     );
@@ -95,7 +105,12 @@ describe("Node.js detection", () => {
 
   it("detects Create React App output folder", () => {
     const a = analyzeProject(
-      project({ "package.json": { scripts: { start: "react-scripts start", build: "react-scripts build" }, dependencies: { react: "18", "react-scripts": "5" } } }),
+      project({
+        "package.json": {
+          scripts: { start: "react-scripts start", build: "react-scripts build" },
+          dependencies: { react: "18", "react-scripts": "5" },
+        },
+      }),
     );
     expect(a.components[0]).toMatchObject({ role: "frontend", staticDir: "build", start: null });
   });
@@ -103,10 +118,17 @@ describe("Node.js detection", () => {
   it("detects a backend + frontend project in server/ and client/ folders", () => {
     const a = analyzeProject(
       project({
-        "package.json": { name: "taxiops", scripts: { dev: "concurrently \"cd server && npm run dev\" \"cd client && npm run dev\"" } },
+        "package.json": {
+          name: "taxiops",
+          scripts: { dev: 'concurrently "cd server && npm run dev" "cd client && npm run dev"' },
+        },
         "server/package.json": { scripts: { start: "node index.js" }, dependencies: { express: "4", pg: "8" } },
         "server/index.js": "",
-        "client/package.json": { scripts: { build: "vite build" }, dependencies: { react: "19" }, devDependencies: { vite: "6" } },
+        "client/package.json": {
+          scripts: { build: "vite build" },
+          dependencies: { react: "19" },
+          devDependencies: { vite: "6" },
+        },
         "client/index.html": "",
       }),
     );
@@ -124,10 +146,68 @@ describe("Node.js detection", () => {
       project({
         "package.json": { scripts: { start: "node server.js" }, dependencies: { express: "4" } },
         "server.js": "",
-        "client/package.json": { scripts: { build: "react-scripts build" }, dependencies: { react: "18", "react-scripts": "5" } },
+        "client/package.json": {
+          scripts: { build: "react-scripts build" },
+          dependencies: { react: "18", "react-scripts": "5" },
+        },
       }),
     );
     expect(a.components.map((c) => `${c.role}:${c.path || "."}`)).toEqual(["backend:.", "frontend:client"]);
+  });
+
+  it("detects Python AI helpers inside a Node backend without replacing its start process", () => {
+    const a = analyzeProject(
+      project({
+        "package.json": { scripts: { start: "node server.js" }, dependencies: { express: "4" } },
+        "server.js": `require("child_process").spawn(process.env.NEXUS_PYTHON, ["ai/infer.py"]);`,
+        "ai/requirements.txt": "torch==2.8.0\ntransformers>=4\n",
+        "ai/infer.py": "import torch\n",
+      }),
+    );
+
+    expect(a.runtime).toBe("node");
+    expect(a.summary).toBe("Node.js + Express backend, Python helpers");
+    expect(primary(a.components)).toMatchObject({ runtime: "node", framework: "Express" });
+    expect(a.components[1]).toMatchObject({
+      auxiliary: true,
+      runtime: "python",
+      path: "ai",
+      framework: "Python helpers",
+      install: { command: "pip", args: ["install", "-r", "requirements.txt"] },
+      start: null,
+    });
+  });
+
+  it("provides Python for a manifest-free helper script in a Node app", () => {
+    const a = analyzeProject(
+      project({
+        "package.json": { main: "server.js", dependencies: {} },
+        "server.js": "",
+        "scripts/thumbnail.py": "from pathlib import Path\n",
+      }),
+    );
+    expect(a.components).toHaveLength(2);
+    expect(a.components[1]).toMatchObject({ auxiliary: true, runtime: "python", install: null });
+    expect(a.warnings.join(" ")).toMatch(/third-party packages/);
+  });
+
+  it("recognizes production requirements files and a root Python version for nested helpers", () => {
+    const a = analyzeProject(
+      project({
+        "package.json": { main: "server.js", dependencies: {} },
+        "server.js": "",
+        ".python-version": "3.12\n",
+        "ml/requirements-dev.txt": "pytest==8.4.2\n",
+        "ml/requirements-prod.txt": "scikit-learn==1.7.2\n",
+        "ml/predict.py": "import sklearn\n",
+      }),
+    );
+    expect(a.components[1]).toMatchObject({
+      auxiliary: true,
+      path: "ml",
+      runtimeVersion: "3.12",
+      install: { command: "pip", args: ["install", "-r", "requirements-prod.txt"] },
+    });
   });
 
   it("detects plain static sites", () => {
@@ -138,7 +218,9 @@ describe("Node.js detection", () => {
   });
 
   it("ignores node_modules and explains unrecognised folders", () => {
-    const a = analyzeProject(project({ "node_modules/express/package.json": { name: "express" }, "notes.txt": "hello" }));
+    const a = analyzeProject(
+      project({ "node_modules/express/package.json": { name: "express" }, "notes.txt": "hello" }),
+    );
     expect(a.components).toEqual([]);
     expect(a.warnings[0]).toMatch(/couldn't recognise/);
   });
@@ -149,7 +231,9 @@ describe("Node.js detection", () => {
   });
 
   it("notices Dockerfiles", () => {
-    const a = analyzeProject(project({ "package.json": { main: "a.js", dependencies: {} }, "a.js": "", Dockerfile: "FROM node" }));
+    const a = analyzeProject(
+      project({ "package.json": { main: "a.js", dependencies: {} }, "a.js": "", Dockerfile: "FROM node" }),
+    );
     expect(a.hasDockerfile).toBe(true);
   });
 });
