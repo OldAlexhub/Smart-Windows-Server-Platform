@@ -1,4 +1,4 @@
-import { Copy, Eye, KeyRound, Link2, Network, Unlink } from "lucide-react";
+import { Code2, Copy, Eye, KeyRound, Link2, Network, Unlink } from "lucide-react";
 import { useState } from "react";
 import { Link } from "react-router";
 import { ApiError, del, get, post } from "../lib/api";
@@ -26,7 +26,8 @@ export function DatabaseLink({ kind, databaseId, canManage }: { kind: "tables" |
   const [revealed, setRevealed] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<ApiError | null>(null);
-  const [copied, setCopied] = useState(false);
+  const [copied, setCopied] = useState<"url" | "code" | null>(null);
+  const [language, setLanguage] = useState<"python" | "r">("python");
 
   async function act(key: string, fn: () => Promise<unknown>) {
     setBusy(key);
@@ -40,17 +41,25 @@ export function DatabaseLink({ kind, databaseId, canManage }: { kind: "tables" |
       setBusy(null);
     }
   }
-  const copy = async (text: string) => {
+  const copy = async (text: string, target: "url" | "code") => {
     await navigator.clipboard.writeText(text);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2500);
+    setCopied(target);
+    setTimeout(() => setCopied(null), 2500);
   };
 
   if (!data) return error ? <ErrorNote error={error} /> : null;
   const url = revealed ?? data.url;
+  const variable = kind === "tables" ? "DATABASE_URL" : "MONGO_URL";
+  const examples = kind === "tables" ? {
+    python: `# pip install "psycopg[binary]"\nimport os\nimport psycopg\n\nwith psycopg.connect(os.environ["DATABASE_URL"]) as connection:\n    with connection.cursor() as cursor:\n        cursor.execute("SELECT * FROM your_table LIMIT 10")\n        print(cursor.fetchall())`,
+    r: `# install.packages(c("DBI", "RPostgres"))\nlibrary(DBI)\nlibrary(RPostgres)\n\nconnection <- dbConnect(\n  RPostgres::Postgres(),\n  dbname = Sys.getenv("DATABASE_URL")\n)\ndbGetQuery(connection, "SELECT * FROM your_table LIMIT 10")`,
+  } : {
+    python: `# pip install pymongo\nimport os\nfrom pymongo import MongoClient\n\nclient = MongoClient(os.environ["MONGO_URL"])\ndatabase = client.get_default_database()\nprint(list(database.your_collection.find().limit(10)))`,
+    r: `# install.packages("mongolite")\nlibrary(mongolite)\n\ncollection <- mongo(\n  collection = "your_collection",\n  url = Sys.getenv("MONGO_URL")\n)\ncollection$find(limit = 10)`,
+  };
 
   return (
-    <Card title="Connect from another server" sub="Share this database with a computer on your private network. It is never exposed to the internet.">
+    <Card title="Connect with Python, R, or another server" sub="Create a secure database link for code running on a computer in your private network. It is never exposed to the internet.">
       {!data.enabled && (
         <div className="db-link-off">
           <Network size={18} />
@@ -82,7 +91,7 @@ export function DatabaseLink({ kind, databaseId, canManage }: { kind: "tables" |
           <div className="db-link-url">
             <code>{url}</code>
             {revealed ? (
-              <button className="btn small" onClick={() => void copy(revealed)}><Copy size={14} /> {copied ? "Copied" : "Copy"}</button>
+              <button className="btn small" onClick={() => void copy(revealed, "url")}><Copy size={14} /> {copied === "url" ? "Copied" : "Copy link"}</button>
             ) : canManage ? (
               <button className="btn small" disabled={busy !== null} onClick={() => void act("reveal", async () => setRevealed((await get<LinkState>(`${path}?reveal=1`)).url))}><Eye size={14} /> Show & copy</button>
             ) : null}
@@ -107,6 +116,20 @@ export function DatabaseLink({ kind, databaseId, canManage }: { kind: "tables" |
           )}
         </div>
       )}
+      <div className="db-code-guide">
+        <div className="db-code-head">
+          <span className="db-code-icon" aria-hidden><Code2 size={17} /></span>
+          <span><strong>Use this database in code</strong><small>{data.enabled ? <>Copy the connection link above into a <code>{variable}</code> environment variable, then use one of these examples.</> : <>After creating the secure link, save it as <code>{variable}</code> and use one of these examples.</>}</small></span>
+        </div>
+        <div className="db-code-tabs" role="tablist" aria-label="Connection example language">
+          <button role="tab" aria-selected={language === "python"} className={language === "python" ? "active" : ""} onClick={() => setLanguage("python")}>Python</button>
+          <button role="tab" aria-selected={language === "r"} className={language === "r" ? "active" : ""} onClick={() => setLanguage("r")}>R</button>
+        </div>
+        <div className="db-code-block">
+          <pre><code>{examples[language]}</code></pre>
+          <button className="btn small" onClick={() => void copy(examples[language], "code")}><Copy size={14} /> {copied === "code" ? "Copied" : "Copy code"}</button>
+        </div>
+      </div>
       <ErrorNote error={err} />
     </Card>
   );

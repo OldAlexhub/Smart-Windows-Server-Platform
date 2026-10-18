@@ -223,6 +223,9 @@ export function Dashboard({ canCreateApps, canUseAi }: { canCreateApps: boolean;
   const storageUsed = fraction(data.storage.usedBytes, data.storage.totalBytes);
   const memoryUsed = data.memory ? fraction(data.memory.usedBytes, data.memory.totalBytes) : 0;
   const gpuUsed = data.gpu ? fraction(data.gpu.memoryUsedBytes, data.gpu.memoryTotalBytes) : 0;
+  const appsNeedingAttention = data.apps.items.filter((app) => app.status !== "running");
+  const visibleAppProblems = appsNeedingAttention.slice(0, 3);
+  const hiddenAppProblems = Math.max(0, appsNeedingAttention.length - visibleAppProblems.length);
 
   return (
     <>
@@ -280,25 +283,44 @@ export function Dashboard({ canCreateApps, canUseAi }: { canCreateApps: boolean;
 
       <div className="dashboard-main-grid">
         <div className="stack">
-          <Card title="Applications" sub={data.apps.total ? `${data.apps.running} of ${data.apps.total} running` : "Your deployed projects"} action={<Link to="/apps" className="btn ghost small">View all <ArrowRight size={14} /></Link>}>
+          <Card title="Applications" sub={data.apps.total ? "Live status, updated every 10 seconds" : "Your deployed projects"} action={<Link to="/apps" className="btn ghost small">View all <ArrowRight size={14} /></Link>}>
             {data.apps.items.length === 0 ? (
               <div className="dashboard-empty">
                 <Server size={28} aria-hidden />
                 <div><strong>No applications yet</strong><div className="small secondary">Add a project folder and Nexus will set it up.</div></div>
                 {canCreateApps && <Link className="btn primary small" to="/apps/new">Add Application</Link>}
               </div>
+            ) : appsNeedingAttention.length === 0 ? (
+              <Link className="app-health-summary good" to="/apps" aria-label={`All ${data.apps.total} applications are running. View applications.`}>
+                <span className="app-health-icon" aria-hidden><CheckCircle2 size={28} /></span>
+                <span className="app-health-copy">
+                  <strong>All {data.apps.total} {data.apps.total === 1 ? "application is" : "applications are"} running</strong>
+                  <span>No issues detected across your applications.</span>
+                </span>
+                <Status tone="good">All working</Status>
+                <ArrowRight size={16} className="muted" aria-hidden />
+              </Link>
             ) : (
-              <div className="list app-list">
-                {data.apps.items.slice(0, 6).map((app) => (
-                  <Link className="list-item app-row" to={`/apps/${app.id}`} key={app.id}>
-                    <span className="app-avatar" aria-hidden>{app.name.slice(0, 1).toUpperCase()}</span>
-                    <span className="app-main"><strong>{app.name}</strong><span className="small muted">{app.framework || app.runtime}</span></span>
-                    <StatusOf status={app.status} />
-                    <span className="app-metric num small">{app.cpuPercent.toFixed(0)}% CPU</span>
-                    <span className="app-metric num small">{formatBytes(app.memoryBytes)}</span>
-                    <ArrowRight size={15} className="muted" aria-hidden />
-                  </Link>
-                ))}
+              <div className="app-health-problems">
+                <div className="app-health-summary warning" role="status">
+                  <span className="app-health-icon" aria-hidden><CircleAlert size={28} /></span>
+                  <span className="app-health-copy">
+                    <strong>{appsNeedingAttention.length} {appsNeedingAttention.length === 1 ? "application needs" : "applications need"} attention</strong>
+                    <span>{data.apps.running} of {data.apps.total} running normally.</span>
+                  </span>
+                  <Status tone="warning">Check status</Status>
+                </div>
+                <div className="list app-attention-list">
+                  {visibleAppProblems.map((app) => (
+                    <Link className="list-item app-row" to={`/apps/${app.id}`} key={app.id}>
+                      <span className="app-avatar" aria-hidden>{app.name.slice(0, 1).toUpperCase()}</span>
+                      <span className="app-main"><strong>{app.name}</strong><span className="small muted">{app.framework || app.runtime}</span></span>
+                      <StatusOf status={app.status} />
+                      <ArrowRight size={15} className="muted" aria-hidden />
+                    </Link>
+                  ))}
+                </div>
+                {hiddenAppProblems > 0 && <Link className="app-health-more small" to="/apps">View {hiddenAppProblems} more needing attention <ArrowRight size={14} /></Link>}
               </div>
             )}
           </Card>

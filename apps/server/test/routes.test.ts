@@ -121,6 +121,15 @@ describe("database routes", () => {
     });
     expect(csv.headers["content-type"]).toMatch(/text\/csv/);
     expect(csv.body.split("\r\n")[0]).toBe("driver_id,driver_name,balance");
+    const allCsv = await app.inject({
+      url: `/api/v1/databases/${id}/export.zip`,
+      headers: { cookie: (await login()).cookie },
+    });
+    expect(allCsv.headers["content-type"]).toMatch(/application\/zip/);
+    expect(allCsv.headers["content-disposition"]).toContain("fleet_csv.zip");
+    expect(allCsv.rawPayload.readUInt32LE(0)).toBe(0x04034b50);
+    expect(allCsv.rawPayload.includes(Buffer.from("drivers.csv"))).toBe(true);
+    expect(allCsv.rawPayload.includes(Buffer.from("driver_id,driver_name,balance"))).toBe(true);
     expect(
       ctx.audit
         .query({ action: "data." })

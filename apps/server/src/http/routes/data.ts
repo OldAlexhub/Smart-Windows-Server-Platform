@@ -1,4 +1,5 @@
 import type { FastifyRequest } from "fastify";
+import { Readable } from "node:stream";
 import { z } from "zod";
 import { databaseStats, type Filter } from "@nexus/database";
 import { DEFAULT_POLICY } from "@nexus/backups";
@@ -7,6 +8,7 @@ import { NexusError, type DatabaseSummary } from "@nexus/shared";
 import type { NexusContext } from "../../context";
 import type { RouteModule } from "../server";
 import { requirePermission, requireUser } from "../auth";
+import { zipCsvFiles } from "../csv-zip";
 import { documentSummary } from "./documents";
 
 /** Database access follows the apps using it: e.g. "app.data.read" on any attached app. */
@@ -141,10 +143,29 @@ export const dataRoutes: RouteModule = (app, ctx) => {
     const { id, table } = req.params as { id: string; table: string };
     const { user } = requireDbPermission(ctx, req, id, "app.data.read");
     ctx.audit.record({ actor: { type: "user", id: user.id, name: user.displayName }, action: "database.export", target: { type: "database", id }, details: { table } });
-    const { Readable } = await import("node:stream");
     reply.header("Content-Type", "text/csv; charset=utf-8");
     reply.header("Content-Disposition", `attachment; filename="${table.replace(/[^A-Za-z0-9_-]/g, "_")}.csv"`);
+    reply.header("Cache-Control", "no-store");
     return reply.send(Readable.from(need().browser.exportCsv(id, table, parseBrowse(req.query))));
+  });
+
+  app.get("/api/v1/databases/:id/export.zip", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const { user, db } = requireDbPermission(ctx, req, id, "app.data.read");
+    const { browser } = need();
+    const tables = await browser.listTables(id);
+    const used = new Map<string, number>();
+    const files = tables.map((table) => {
+      const base = table.name.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 120) || "table";
+      const count = (used.get(base) ?? 0) + 1;
+      used.set(base, count);
+      return { name: `${base}${count === 1 ? "" : `_${count}`}.csv`, content: browser.exportCsv(id, table.name) };
+    });
+    ctx.audit.record({ actor: { type: "user", id: user.id, name: user.displayName }, action: "database.export", target: { type: "database", id }, details: { tables: tables.map((table) => table.name) } });
+    reply.header("Content-Type", "application/zip");
+    reply.header("Content-Disposition", `attachment; filename="${db.dbName.replace(/[^A-Za-z0-9_-]/g, "_")}_csv.zip"`);
+    reply.header("Cache-Control", "no-store");
+    return reply.send(Readable.from(zipCsvFiles(files)));
   });
 
   app.post("/api/v1/databases/:id/tables/:table/rows", async (req) => {

@@ -655,6 +655,59 @@ table.data tr:hover td {
   gap: 14px;
   color: var(--text-muted);
 }
+.app-health-summary {
+  min-height: 104px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
+  background: var(--surface-sunken);
+  color: var(--text-primary);
+}
+a.app-health-summary {
+  transition: border-color 0.12s, background 0.12s;
+}
+a.app-health-summary:hover {
+  border-color: color-mix(in srgb, var(--good) 42%, var(--border));
+  background: color-mix(in srgb, var(--good) 6%, var(--surface-sunken));
+  text-decoration: none;
+}
+.app-health-summary.good {
+  border-color: color-mix(in srgb, var(--good) 28%, var(--border));
+  background: color-mix(in srgb, var(--good) 7%, var(--surface-sunken));
+}
+.app-health-summary.warning {
+  border-color: color-mix(in srgb, var(--warning) 34%, var(--border));
+  background: color-mix(in srgb, var(--warning) 7%, var(--surface-sunken));
+}
+.app-health-icon {
+  width: 48px;
+  height: 48px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  color: var(--good-text);
+  background: color-mix(in srgb, var(--good) 13%, var(--surface-1));
+}
+.app-health-summary.warning .app-health-icon {
+  color: var(--warning-text);
+  background: color-mix(in srgb, var(--warning) 14%, var(--surface-1));
+}
+.app-health-copy {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.app-health-copy strong { font-size: 16px; }
+.app-health-copy > span { color: var(--text-muted); font-size: 13px; }
+.app-health-problems { display: flex; flex-direction: column; gap: 10px; }
+.app-attention-list { border: 1px solid var(--border); border-radius: var(--radius-m); overflow: hidden; }
+.app-health-more { display: flex; align-items: center; justify-content: center; gap: 5px; padding: 2px; }
 .app-row {
   color: var(--text-primary);
   min-width: 0;
@@ -740,6 +793,9 @@ table.data tr:hover td {
   .ask-layout { grid-template-columns: 1fr; gap: 16px; }
   .service-row .status { font-size: 0; gap: 0; }
   .service-row .status svg { width: 18px; height: 18px; }
+  .app-health-summary { align-items: flex-start; flex-wrap: wrap; }
+  .app-health-summary .status { margin-left: 62px; }
+  .app-health-summary > .muted { display: none; }
 }
 @media (max-width: 420px) {
   .health-content { flex-direction: column; }
