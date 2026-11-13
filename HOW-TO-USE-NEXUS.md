@@ -60,9 +60,13 @@ To **update** Nexus later, just run the newer **NexusSetup.exe** the same way. Y
 
 **NexusPortable.zip** runs Nexus straight from a folder, even from a USB drive.
 1. Unzip **NexusPortable.zip** anywhere you like.
+   Extract the whole ZIP first; don't run the launcher from inside the ZIP window.
 2. Double-click **Start Nexus.cmd**. Nexus opens in your web browser (at `http://127.0.0.1:7781`).
 3. When you're done, double-click **Stop Nexus.cmd**. Nexus closes your apps and databases properly.
 - Everything you make is kept in the **data** folder inside it. To move it, stop Nexus and copy the whole folder.
+- Moving folders on the same Windows account repairs saved portable paths automatically and saves a settings backup. Moving encrypted data to another computer or Windows account requires Nexus backup/recovery.
+- To update, stop Nexus, extract the new ZIP into a separate folder, and copy your existing **data** folder into it. Keep the old folder until the new copy works.
+- If startup fails, the error stays visible. Details are in **data\nexus\logs\startup-error.log**.
 - It only runs while you're signed in to Windows and until you press Stop. The installed version keeps running all the time.
 - Publishing to the internet, the firewall and the private network need the installed version.
 

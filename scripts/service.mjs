@@ -40,7 +40,9 @@ function findWinsw() {
 
 async function renderXml() {
   // The renderer lives in the server bundle so the installer and the code agree.
-  const mod = await import(new URL("file:///" + join(installDir, "server", "service-config.mjs").replace(/\\/g, "/")).href).catch(() => null);
+  const mod = await import(
+    new URL("file:///" + join(installDir, "server", "service-config.mjs").replace(/\\/g, "/")).href
+  ).catch(() => null);
   const def = {
     installDir,
     nodeExe: join(installDir, "node", "node.exe"),
@@ -56,22 +58,16 @@ async function renderXml() {
 const run = (a) => execFileSync(wrapper, [a], { stdio: "inherit" });
 const status = () => {
   if (!existsSync(wrapper)) return "NonExistent";
-  try {
-    return execFileSync(wrapper, ["status"], { encoding: "utf8" }).trim();
-  } catch {
-    return "NonExistent";
-  }
+  // Access/configuration errors are not evidence that the service is absent.
+  return execFileSync(wrapper, ["status"], { encoding: "utf8" }).trim();
 };
 
 switch (command) {
   case "install": {
     // Upgrade in place: stop and remove the previous registration first.
-    if (status() !== "NonExistent") {
-      try {
-        run("stop");
-      } catch {
-        /* already stopped */
-      }
+    const current = status();
+    if (current !== "NonExistent") {
+      if (current !== "Stopped") run("stop");
       run("uninstall");
     }
     mkdirSync(serviceDir, { recursive: true });
@@ -81,15 +77,13 @@ switch (command) {
     run("start");
     break;
   }
-  case "uninstall":
-    if (status() === "NonExistent") break;
-    try {
-      run("stop");
-    } catch {
-      /* not running */
-    }
+  case "uninstall": {
+    const current = status();
+    if (current === "NonExistent") break;
+    if (current !== "Stopped") run("stop");
     run("uninstall");
     break;
+  }
   case "start":
   case "stop":
   case "status":

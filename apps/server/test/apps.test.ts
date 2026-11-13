@@ -275,6 +275,48 @@ describe("deleting databases", () => {
   }, 120_000);
 });
 
+describe("frontend build settings", () => {
+  it("bakes imported public settings into frontend builds and keeps private settings out", async () => {
+    const dir = join(home, "src", "FrontendSettings");
+    project(dir, {
+      "package.json": JSON.stringify({
+        name: "frontend-settings",
+        dependencies: { react: "file:./fake-react" },
+        scripts: { preinstall: "node install.js", build: "node build.js" },
+      }),
+      "fake-react/package.json": JSON.stringify({ name: "react", version: "1.0.0" }),
+      ".env.production": "REACT_APP_API_URL=https://api.example.test\nVITE_API_URL=https://vite.example.test\nPRIVATE_API_KEY=private-build-test\n",
+      "install.js": `require("fs").writeFileSync("install-env.json", JSON.stringify({api:process.env.REACT_APP_API_URL||null,secret:process.env.PRIVATE_API_KEY||null}));`,
+      "build.js": `const fs=require("fs");fs.mkdirSync("dist",{recursive:true});fs.writeFileSync("dist/index.html",JSON.stringify({
+        api:process.env.REACT_APP_API_URL||null,
+        vite:process.env.VITE_API_URL||null,
+        secret:process.env.PRIVATE_API_KEY||null,
+        nexusToken:process.env.NEXUS_API_TOKEN||null,
+        envFileCopied:fs.existsSync(".env.production"),
+        install:JSON.parse(fs.readFileSync("install-env.json","utf8"))
+      }));`,
+    });
+    const created = await call("POST", "/api/v1/apps", {
+      sourceDir: dir, name: "Frontend Settings", data: { mode: "none" }, access: "private", importEnvFile: true,
+    });
+    expect(created.status).toBe(200);
+    const id = created.body.appId;
+    expect((await waitJob(created.body.jobId)).status).toBe("succeeded");
+    // API_URL is classified as secret storage by detection; builds still need its real public value.
+    expect(ctx.vault.get(`app:${id}/env/REACT_APP_API_URL`)).toBe("https://api.example.test");
+    const first = await get(gwPorts.localPort, `${id}.nexus.localhost`);
+    expect(first.status).toBe(200);
+    expect(JSON.parse(first.body)).toEqual({
+      api: "https://api.example.test", vite: "https://vite.example.test",
+      secret: null, nexusToken: null, envFileCopied: false, install: { api: null, secret: null },
+    });
+    await call("PUT", `/api/v1/apps/${id}/settings/REACT_APP_API_URL`, { value: "https://updated.example.test" });
+    const redeploy = await call("POST", `/api/v1/apps/${id}/deploy`);
+    expect((await waitJob(redeploy.body.jobId)).status).toBe("succeeded");
+    expect(JSON.parse((await get(gwPorts.localPort, `${id}.nexus.localhost`)).body).api).toBe("https://updated.example.test");
+  }, 180_000);
+});
+
 describe("automatic health self-correction", () => {
   it("keeps a VDP-like HTTP server running when an inferred /health route returns 404", async () => {
     const dir = join(home, "src", "VDP");

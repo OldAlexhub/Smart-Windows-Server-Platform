@@ -19,6 +19,7 @@ import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, r
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { build } from "esbuild";
+import { packagePortable } from "./package-portable.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const out = join(root, "dist", "app");
@@ -117,17 +118,7 @@ writeFileSync(join(out, "VERSION"), `${productName} ${version}\n`);
 // explicitly leave it (and the user data stored inside it) untouched.
 if (!args.includes("--skip-portable")) {
   step("Portable copy");
-  const portable = join(root, "dist", "NexusPortable");
-  rmSync(portable, { recursive: true, force: true });
-  cpSync(out, join(portable, "app"), { recursive: true });
-  for (const f of readdirSync(join(root, "scripts", "portable"))) cpSync(join(root, "scripts", "portable", f), join(portable, f));
-  cpSync(join(root, "HOW-TO-USE-NEXUS.md"), join(portable, "HOW-TO-USE-NEXUS.md"));
-  const portableZip = join(root, "dist", "NexusPortable.zip");
-  rmSync(portableZip, { force: true });
-  // Windows' bsdtar writes zip archives with -a (format from the file extension).
-  const tarExe = process.platform === "win32" ? join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe") : "tar";
-  execFileSync(tarExe, ["-a", "-c", "-f", portableZip, "-C", join(root, "dist"), "NexusPortable"], { stdio: "inherit" });
-  console.log(`  ${portableZip}`);
+  console.log(`  ${packagePortable(root)}`);
 }
 
 if (args.includes("--no-installer")) {

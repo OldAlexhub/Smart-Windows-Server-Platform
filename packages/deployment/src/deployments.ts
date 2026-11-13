@@ -190,6 +190,8 @@ export class DeploymentManager {
     appId: string;
     slug: string;
     analysis: ProjectAnalysis;
+    /** Browser-visible framework settings, supplied only to the build process. */
+    publicBuildEnv?: Record<string, string>;
     onStep?: StepCallback;
     onLine?: LineCallback;
   }): Promise<DeploymentRecord> {
@@ -320,6 +322,7 @@ export class DeploymentManager {
         const resolved = resolveCommand(spec.command, spec.args, ctx);
         onLine("system", `> ${spec.command} ${spec.args.join(" ")}${c.path ? `  (in ${c.path})` : ""}`);
         const env = this.toolEnv(slug, resolved.pathDirs, {
+          ...(phase === "build" ? input.publicBuildEnv : {}),
           ...(spec.env ?? {}),
           ...resolved.env,
           ...phaseEnv(c, phase),

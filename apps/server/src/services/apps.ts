@@ -606,6 +606,14 @@ export class AppManager {
       appId,
       slug: appId,
       analysis,
+      // Frontend compilers bake these public values into their output. The source .env
+      // files are deliberately excluded from releases, so use the imported settings.
+      // Never pass runtime secrets or managed database credentials to frontend builds.
+      publicBuildEnv: Object.fromEntries(
+        this.envView(appId, true)
+          .filter(({ name }) => /^(REACT_APP_|VITE_|NEXT_PUBLIC_|NUXT_PUBLIC_|GATSBY_|PUBLIC_)/.test(name))
+          .map(({ name, value }) => [name, value]),
+      ),
       onStep: (k, s, d) => job.log(`${k}: ${s}${d ? ` — ${d}` : ""}`),
       onLine: (_s, l) => {
         job.log(l);
