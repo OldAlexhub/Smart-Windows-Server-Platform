@@ -12,6 +12,8 @@ import { checkHttps, normalizeDomain } from "@nexus/network";
 import { AppSupervisor, buildIsolatedEnv, HealthMonitor, healthyHttpStatus, killTree, resolveCommand, runToCompletion, substituteArgs, type AppProcessConfig, type HealthEvent, type ProbeResult } from "@nexus/runtime";
 
 import { DEFAULT_APP_SCOPES } from "@nexus/security";
+import { parseEnvUpload } from "@nexus/shared/env-file";
+import { ResourcePressurePolicy } from "@nexus/runtime";
 import {
   BRAND,
   NexusError,
@@ -29,6 +31,8 @@ import { fromJson, toJson } from "@nexus/state";
 import type { NexusContext } from "../context";
 import type { GatewayService } from "./gateway";
 import type { JobHandle } from "./jobs";
+import { GitHubSourceService } from "./github-source";
+import { extractZip, projectRoot } from "./project-archive";
 
 /** When a process started (ms since epoch), or null if it isn't running. */
 function processCreationTime(pid: number): Promise<number | null> {
@@ -87,6 +91,7 @@ export interface CreateAppInput {
   domain?: string | null;
   /** Import non-Nexus-managed values from .env files in sourceDir before the first start. */
   importEnvFile?: boolean;
+  envFileContent?: string;
   settings?: Record<string, string>;
 }
 
@@ -195,6 +200,7 @@ export interface AppReliabilityObserver {
  * into a running, connected, monitored, backed-up application.
  */
 export class AppManager {
+  readonly github: GitHubSourceService;
   private readonly supervisors = new Map<string, AppSupervisor>();
   /** When each app's settings last changed (to tell whether the running process has them). */
   private readonly settingsChangedAt = new Map<string, number>();
@@ -206,14 +212,39 @@ export class AppManager {
   private readonly autoAttempted = new Map<string, number>();
   private autoTimer: NodeJS.Timeout | null = null;
   private reliabilityObserver: AppReliabilityObserver | null = null;
+  private readonly backupLocks = new Set<string>();
+
+  lockForBackup(appId: string): () => void {
+    this.require(appId);
+    if (this.backupLocks.has(appId) || this.activeDeploymentJobId(appId)) throw NexusError.conflict("Wait for this application's current backup, restore or update to finish.");
+    this.backupLocks.add(appId);
+    return () => this.backupLocks.delete(appId);
+  }
+
+  restoreBackupSettings(appId: string, saved: AppRecord, includeSettings: boolean): void {
+    if (saved.id !== appId) throw NexusError.invalid("The backup belongs to a different application.");
+    this.update(appId, {
+      analysis: saved.analysis,
+      ...(includeSettings ? { env: saved.env, resources: saved.resources, accessMode: saved.accessMode, publicHosts: saved.publicHosts, dbSlot: saved.dbSlot } : {}),
+    });
+    // Do not immediately overwrite restored code with an already-modified source folder.
+    this.autoAttempted.set(appId, Date.now());
+  }
 
   constructor(
     private readonly ctx: NexusContext,
     private readonly gateway: GatewayService,
   ) {
     ctx.store.migrate(appMigrations);
+    this.github = new GitHubSourceService(ctx, this);
     ctx.appPidsProvider = () =>
       [...this.supervisors.entries()].filter(([, s]) => s.pid).map(([appId, s]) => ({ appId, pid: s.pid! }));
+    const resourcePolicy = new ResourcePressurePolicy();
+    ctx.resourceSampleProvider = (memory, apps) => {
+      for (const [id, idleUnderPressure] of resourcePolicy.sample(memory.totalBytes, memory.usedBytes, apps)) {
+        this.supervisors.get(id)?.setMemoryPressure(idleUnderPressure);
+      }
+    };
     gateway.setSitesProvider(() => this.gatewaySites());
     ctx.onStop(() => this.stopAll());
   }
@@ -324,10 +355,11 @@ export class AppManager {
   // ------------------------------------------------------------------ create & deploy
 
   /** Registers the app and starts the deployment job. Returns immediately. */
-  create(input: CreateAppInput, actor: { id: string; name: string }): { appId: string; jobId: string } {
+  create(input: CreateAppInput, actor: { id: string; name: string }, initialize?: (appId: string) => void): { appId: string; jobId: string } {
     if (!this.ctx.deployments) throw NexusError.conflict("Finish setting up the server first.");
     const analysis = this.analyze(input.sourceDir);
     if (analysis.components.length === 0) throw NexusError.invalid(analysis.warnings[0] ?? "Nexus couldn't recognise this project.");
+    const uploadedEnv = input.envFileContent === undefined ? null : this.uploadedEnvValues(input.envFileContent, analysis);
     const name = (input.name ?? analysis.name).trim().slice(0, 80) || analysis.name;
     const id = this.uniqueId(name);
     const hosts = input.domain ? [normalizeDomain(input.domain)] : [];
@@ -337,7 +369,12 @@ export class AppManager {
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, '{}', ?, 'running', ?, ?)`,
       [id, name, input.sourceDir, toJson(analysis), input.access, toJson(hosts), input.data.mode, analysis.database.kind === "mongodb" ? null : (input.data.databaseId ?? null), toJson(AUTO_RESOURCES), now, now],
     );
+    try { initialize?.(id); }
+    catch (error) { this.ctx.store.run("DELETE FROM apps WHERE id = ?", [id]); throw error; }
     if (input.importEnvFile) this.importEnvFile(id);
+    if (uploadedEnv) this.ctx.store.transaction(() => {
+      for (const [key, value] of Object.entries(uploadedEnv.values)) this.setEnv(id, key, value);
+    });
     const allowedSettings = new Set(analysis.env.filter((item) => !item.managed).map((item) => item.name));
     for (const [setting, value] of Object.entries(input.settings ?? {})) {
       if (allowedSettings.has(setting) && value) this.setEnv(id, setting, value);
@@ -349,6 +386,7 @@ export class AppManager {
 
   /** Deploys the current contents of the app's folder as a new release. */
   deploy(appId: string, opts: { data?: CreateAppInput["data"]; first?: boolean } = {}) {
+    if (this.backupLocks.has(appId)) throw NexusError.conflict("Wait for the application's backup or restore to finish.");
     const app = this.require(appId);
     const steps = [
       { key: "analyze", label: "Inspecting the application" },
@@ -393,6 +431,7 @@ export class AppManager {
    * one folder with the project in it (as GitHub's "Download ZIP" does).
    */
   async uploadSource(appId: string, zipFile: string): Promise<{ jobId: string; files: number }> {
+    if (this.backupLocks.has(appId)) throw NexusError.conflict("Wait for the application's backup or restore to finish.");
     const app = this.require(appId);
     if (this.activeDeploymentJobId(appId)) throw NexusError.conflict(`${app.name} is already being updated. Wait for that update to finish.`);
     const appDir = this.ctx.deployments!.appDir(appId);
@@ -401,12 +440,7 @@ export class AppManager {
     try {
       await extractZip(zipFile, incoming);
       // A single folder at the top (GitHub's "Download ZIP"): the project is inside it.
-      let root = incoming;
-      for (;;) {
-        const entries = readdirSync(root, { withFileTypes: true }).filter((e) => !e.name.startsWith("__MACOSX"));
-        if (entries.length === 1 && entries[0]!.isDirectory()) root = join(root, entries[0]!.name);
-        else break;
-      }
+      const root = projectRoot(incoming);
       const files = countFiles(root);
       if (!files) throw NexusError.invalid("That zip file is empty.");
       const analysis = this.analyze(root);
@@ -454,7 +488,7 @@ export class AppManager {
     const pending = current && existsSync(app.sourceDir) ? sourceChangesSince(app.sourceDir, new Date(current.createdAt)).changed.length : 0;
     const job = this.deployJobs.get(appId);
     return {
-      source: { dir: app.sourceDir, uploaded: app.sourceDir === this.uploadedSourceDir(appId), exists: existsSync(app.sourceDir) },
+      source: { dir: app.sourceDir, uploaded: app.sourceDir === this.uploadedSourceDir(appId), exists: existsSync(app.sourceDir), github: this.github.status(appId) },
       autoDeploy: this.autoDeployEnabled(appId),
       deployKey: { enabled: !!key, createdAt: key?.createdAt ?? null, url: `/api/v1/hooks/deploy/${appId}` },
       pendingChanges: pending,
@@ -466,8 +500,20 @@ export class AppManager {
     return !!this.ctx.settings.get<Record<string, boolean>>(AUTO_DEPLOY, {})[appId];
   }
 
+  restoreLocalSource(appId: string, path: string): void {
+    if (this.backupLocks.has(appId) || this.activeDeploymentJobId(appId)) throw NexusError.conflict("Wait for this application's backup or update to finish.");
+    if (existsSync(path)) this.update(appId, { sourceDir: path });
+  }
+
+  /** Called before the first deployment, after an imported source is moved into its app folder. */
+  adoptImportedSource(appId: string, path: string): void {
+    this.require(appId);
+    this.update(appId, { sourceDir: path, analysis: this.analyze(path) });
+  }
+
   setAutoDeploy(appId: string, enabled: boolean): void {
     this.require(appId);
+    if (enabled) this.github.pause(appId);
     const all = { ...this.ctx.settings.get<Record<string, boolean>>(AUTO_DEPLOY, {}) };
     if (enabled) all[appId] = true;
     else delete all[appId];
@@ -484,7 +530,7 @@ export class AppManager {
     for (const app of this.list()) {
       if (!this.autoDeployEnabled(app.id) || app.desiredState !== "running") continue;
       const current = this.ctx.deployments?.current(app.id);
-      if (!current || !existsSync(app.sourceDir) || this.activeDeploymentJobId(app.id)) continue;
+      if (!current || !existsSync(app.sourceDir) || this.activeDeploymentJobId(app.id) || this.backupLocks.has(app.id)) continue;
       const { changed, newestMs } = sourceChangesSince(app.sourceDir, new Date(current.createdAt));
       if (!changed.length || now - newestMs < AUTO_DEPLOY_QUIET_MS || (this.autoAttempted.get(app.id) ?? 0) >= newestMs) continue;
       this.autoAttempted.set(app.id, newestMs);
@@ -496,6 +542,7 @@ export class AppManager {
   }
 
   startAutoDeploy(): void {
+    this.github.start();
     if (this.autoTimer) return;
     this.autoTimer = setInterval(() => void this.autoDeployTick().catch((e) => this.ctx.log.warn("automatic update check failed", { err: e as Error })), AUTO_DEPLOY_CHECK_MS);
     this.autoTimer.unref();
@@ -997,6 +1044,7 @@ export class AppManager {
 
   /** Goes back to an earlier version. Warns (and needs confirmation) if the database structure changed since. */
   async rollback(appId: string, deploymentId: string, confirmed: boolean): Promise<{ status: AppStatus; requiresConfirmation?: string }> {
+    if (this.backupLocks.has(appId)) throw NexusError.conflict("Wait for this application's backup or restore to finish.");
     const app = this.require(appId);
     const deployments = this.ctx.deployments!;
     const target = deployments.require(deploymentId);
@@ -1133,6 +1181,30 @@ export class AppManager {
     return chosen.filter((n) => values.get(n));
   }
 
+  private uploadedEnvValues(content: string, analysis: ProjectAnalysis) {
+    let values: Record<string, string>;
+    try { values = parseEnvUpload(content); }
+    catch (error) { throw NexusError.invalid((error as Error).message); }
+    const managed = new Set(analysis.env.filter((entry) => entry.managed).map((entry) => entry.name));
+    const skipped: string[] = [];
+    for (const name of Object.keys(values)) {
+      if (managed.has(name) || name.toUpperCase().startsWith(BRAND.envPrefix) || ["PORT", "HOST", "__PROTO__", "CONSTRUCTOR", "PROTOTYPE"].includes(name.toUpperCase())) {
+        skipped.push(name); delete values[name];
+      }
+    }
+    return { values, skipped };
+  }
+
+  uploadEnvFile(appId: string, content: string, preview: boolean) {
+    const app = this.require(appId);
+    const { values, skipped } = this.uploadedEnvValues(content, app.analysis);
+    const settings = Object.keys(values).map((name) => ({ name, alreadySet: this.hasEnv(appId, name) }));
+    if (!preview) this.ctx.store.transaction(() => {
+      for (const [name, value] of Object.entries(values)) this.setEnv(appId, name, value);
+    });
+    return { settings, skipped, imported: preview ? [] : Object.keys(values), restartNeeded: !preview && settings.length > 0 };
+  }
+
   setResources(appId: string, resources: ResourcePolicy): void {
     this.require(appId);
     this.update(appId, { resources });
@@ -1244,8 +1316,10 @@ export class AppManager {
   }
 
   async remove(appId: string, confirmation: string): Promise<void> {
+    if (this.backupLocks.has(appId)) throw NexusError.conflict("Wait for the application's backup or restore to finish.");
     const app = this.require(appId);
     if (confirmation !== app.name) throw NexusError.invalid(`Type "${app.name}" to confirm removing this application.`);
+    this.github.disconnect(appId);
     await this.stop(appId);
     this.ctx.appTokens.revokeAll(appId);
     this.ctx.ports.release(`app:${appId}`);
@@ -1461,17 +1535,6 @@ function toRecord(r: AppRow): AppRecord {
     problem: r.problem ? fromJson<FriendlyProblem | null>(r.problem, null) : null,
     createdAt: r.created_at,
   };
-}
-
-/** Unpacks a .zip with Windows' own tar (bsdtar), which refuses paths that would land outside `dir`. */
-function extractZip(zipFile: string, dir: string): Promise<void> {
-  const tar = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe");
-  return new Promise((resolve, reject) => {
-    execFile(existsSync(tar) ? tar : "tar", ["-x", "-f", zipFile, "-C", dir], { windowsHide: true, timeout: 10 * 60_000 }, (err, _out, stderr) => {
-      if (err) reject(NexusError.invalid(`That file couldn't be unpacked. Make sure it's a .zip file. ${String(stderr).split("\n")[0] ?? ""}`.trim()));
-      else resolve();
-    });
-  });
 }
 
 function countFiles(dir: string, limit = 200_000): number {

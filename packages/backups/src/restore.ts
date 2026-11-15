@@ -20,6 +20,7 @@ export interface RestoreTarget {
   documents?: { dbName: string; importFrom: (dir: string) => Promise<unknown> } | null;
   /** Where each backed-up folder goes back to. */
   fileDirs: { name: string; path: string }[];
+  validateConfig?: (config: Record<string, unknown>) => void;
 }
 
 export interface RestoreResult {
@@ -27,6 +28,7 @@ export interface RestoreResult {
   safetyBackupId: string | null;
   /** Configuration from the backup, for the caller to apply (it knows how to re-wire the app). */
   config: Record<string, unknown> | null;
+  applicationConfig?: Record<string, unknown> | null;
 }
 
 function run(file: string, args: string[], env: Record<string, string>): Promise<{ code: number; out: string }> {
@@ -66,6 +68,9 @@ export class RestoreManager {
     const staging = join(this.backups.root, ".restore", newId());
     try {
       const manifest = await this.backups.extract(backup.path, staging);
+      if (manifest.appId !== target.current.appId) throw NexusError.invalid("The backup belongs to another application.");
+      const savedConfig = manifest.config ? JSON.parse(readFileSync(join(staging, manifest.config), "utf8")) as Record<string, unknown> : null;
+      if (savedConfig) target.validateConfig?.(savedConfig);
       const restored: RestorePart[] = [];
 
       if (wanted.includes("database") && manifest.documents) {
@@ -87,7 +92,7 @@ export class RestoreManager {
         if (!manifest.database) restored.push("database");
       }
 
-      if (wanted.includes("database") && (manifest.database || !manifest.documents)) {
+      if (wanted.includes("database") && (manifest.database || (!manifest.documents && parts !== "entire"))) {
         if (!manifest.database) throw NexusError.invalid("This backup doesn't contain a database.");
         if (!target.database || !this.pg) throw NexusError.invalid("This application has no database to restore into.");
         await target.database.reset();
@@ -136,7 +141,11 @@ export class RestoreManager {
           cpSync(src, incoming, { recursive: true });
           rmSync(old, { recursive: true, force: true });
           if (existsSync(dest.path)) renameSync(dest.path, old);
-          renameSync(incoming, dest.path);
+          try { renameSync(incoming, dest.path); }
+          catch (error) {
+            if (existsSync(old) && !existsSync(dest.path)) renameSync(old, dest.path);
+            throw error;
+          }
           rmSync(old, { recursive: true, force: true });
         }
         restored.push("files");
@@ -147,7 +156,9 @@ export class RestoreManager {
         config = JSON.parse(readFileSync(join(staging, manifest.config), "utf8")) as Record<string, unknown>;
         restored.push("config");
       }
-      return { restored, safetyBackupId: safety.id, config };
+      const applicationConfig = wanted.includes("files") && manifest.files.includes("application") && manifest.config
+        ? JSON.parse(readFileSync(join(staging, manifest.config), "utf8")) as Record<string, unknown> : null;
+      return { restored, safetyBackupId: safety.id, config, applicationConfig };
     } finally {
       rmSync(staging, { recursive: true, force: true });
     }

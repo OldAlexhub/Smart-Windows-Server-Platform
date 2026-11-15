@@ -13,6 +13,7 @@ beforeEach(() => {
     mkdirSync: vi.fn(),
     readdirSync: vi.fn(),
     writeFileSync: vi.fn(),
+    readFileSync: () => '<service><env name="NEXUS_HOME" value="D:\\NexusData"/><env name="NEXUS_PORT" value="7780"/></service>',
   }));
 });
 

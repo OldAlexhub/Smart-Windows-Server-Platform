@@ -4,6 +4,7 @@ import { Link } from "react-router";
 import { ApiError, del, get, post } from "../lib/api";
 import { useApi } from "../lib/hooks";
 import { Card, ErrorNote, Spinner } from "./ui";
+import { DatabaseAccounts } from "./DatabaseAccounts";
 
 interface LinkState {
   available: boolean;
@@ -130,6 +131,7 @@ export function DatabaseLink({ kind, databaseId, canManage }: { kind: "tables" |
           <button className="btn small" onClick={() => void copy(examples[language], "code")}><Copy size={14} /> {copied === "code" ? "Copied" : "Copy code"}</button>
         </div>
       </div>
+      {kind === "tables" && canManage && data.enabled && data.host && data.port && data.database && <DatabaseAccounts databaseId={databaseId} host={data.host} port={data.port} database={data.database} />}
       <ErrorNote error={err} />
     </Card>
   );

@@ -8,3 +8,4 @@ export * from "./registry";
 export * from "./podman-provider";
 export * from "./exec";
 export * from "./health";
+export * from "./resource-pressure";

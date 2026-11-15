@@ -95,7 +95,7 @@ for (const [name, c] of Object.entries(manifest.components)) {
   if (c.archive === "zip" || c.archive === "tar.gz") {
     // Windows 10+ ships bsdtar, which extracts zip archives too.
     const tar = process.platform === "win32" ? join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe") : "tar";
-    execFileSync(tar, ["-xf", archive, "-C", staging, ...(c.extract ?? [])], { stdio: "inherit" });
+    execFileSync(tar, ["-xmf", archive, "-C", staging, ...(c.extract ?? [])], { stdio: "inherit" });
   } else if (c.archive === "exe") {
     writeFileSync(join(staging, c.fileName), readFileSync(archive));
   }

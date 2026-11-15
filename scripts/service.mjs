@@ -11,8 +11,9 @@
  *   service\NexusServer.exe (copy of WinSW) + service\NexusServer.xml
  */
 import { execFileSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { readServiceSettings } from "./service-settings.mjs";
 
 const args = process.argv.slice(2);
 const command = args[0];
@@ -21,11 +22,12 @@ const opt = (name, fallback) => {
   return i >= 0 ? args[i + 1] : fallback;
 };
 const installDir = opt("install-dir", process.cwd());
-const port = Number(opt("port", "7780"));
+let port = Number(opt("port", "7780"));
 const serviceId = opt("service-id", "NexusServer");
-const home = opt("home", join(process.env.ProgramData ?? "C:\\ProgramData", "Nexus"));
+let home = opt("home", join(process.env.ProgramData ?? "C:\\ProgramData", "Nexus"));
 const serviceDir = join(installDir, "service");
 const wrapper = join(serviceDir, `${serviceId}.exe`);
+const configFile = join(serviceDir, `${serviceId}.xml`);
 
 function findWinsw() {
   for (const root of [join(installDir, "components", "winsw"), join(process.cwd(), "vendor", "winsw")]) {
@@ -67,12 +69,20 @@ switch (command) {
     // Upgrade in place: stop and remove the previous registration first.
     const current = status();
     if (current !== "NonExistent") {
+      const existing = readServiceSettings(readFileSync(configFile, "utf8"));
+      if (!args.includes("--home")) home = existing.home;
+      if (!args.includes("--port")) port = existing.port;
       if (current !== "Stopped") run("stop");
+    }
+    // Resolve and validate every new input before removing a working registration.
+    const winsw = findWinsw();
+    const config = await renderXml();
+    if (current !== "NonExistent") {
       run("uninstall");
     }
     mkdirSync(serviceDir, { recursive: true });
-    copyFileSync(findWinsw(), wrapper);
-    writeFileSync(join(serviceDir, `${serviceId}.xml`), await renderXml());
+    copyFileSync(winsw, wrapper);
+    writeFileSync(configFile, config);
     run("install");
     run("start");
     break;

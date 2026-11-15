@@ -5,6 +5,7 @@
  *   node scripts/build.mjs              # stage dist/app + build installer
  *   node scripts/build.mjs --no-installer
  *   node scripts/build.mjs --skip-portable # leave an in-use portable copy and its data untouched
+ *   node scripts/build.mjs --installer-only # package the already staged and verified dist/app
  *
  * dist/app/ (installed to <Program Files>\Nexus Server\app):
  *   node/            node.exe + npm + corepack (runtime for Nexus and for Node applications)
@@ -16,10 +17,13 @@
  */
 import { execFileSync, execSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { build } from "esbuild";
 import { packagePortable } from "./package-portable.mjs";
+import { buildProcessHelper } from "./build-process-helper.mjs";
+import { stageNpm, verifyNpm } from "./stage-npm.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const out = join(root, "dist", "app");
@@ -35,6 +39,10 @@ const installerName = brand("installerName");
 const version = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version;
 
 step(`Building ${productName} ${version}`);
+if (args.includes("--installer-only")) {
+  if (!existsSync(join(out, "VERSION")) || !existsSync(join(out, "server", "main.mjs"))) throw new Error("Build dist/app before using --installer-only.");
+  verifyNpm(join(out, "node"));
+} else {
 rmSync(out, { recursive: true, force: true });
 mkdirSync(out, { recursive: true });
 
@@ -43,6 +51,7 @@ step("Components (PostgreSQL, MongoDB, FerretDB, DuckDB extensions, Caddy, WinSW
 execFileSync(process.execPath, [join(root, "scripts/fetch-components.mjs")], { stdio: "inherit" });
 const manifest = JSON.parse(readFileSync(join(root, "components.json"), "utf8"));
 for (const [name, c] of Object.entries(manifest.components)) {
+  if (name === "npm") continue; // Installed under node/node_modules, never copied from the host.
   const src = join(root, "vendor", name, c.version);
   if (!existsSync(join(src, ".complete"))) throw new Error(`Component ${name} ${c.version} is missing.`);
   cpSync(src, join(out, "components", name, c.version), {
@@ -84,19 +93,22 @@ await build({
 });
 // Helper libraries pipeline scripts import (Python "nexus", R "nexusR").
 cpSync(join(root, "packages/pipelines/helpers"), join(out, "helpers"), { recursive: true, filter: (p) => !/__pycache__/.test(p) });
+buildProcessHelper(join(out, "helpers", "NexusProcess.exe"));
 for (const pkg of readdirSync(join(root, "node_modules", "@duckdb"))) {
   if (pkg.startsWith("node-bindings-") && pkg !== `node-bindings-${process.platform}-${process.arch}`) continue;
   cpSync(join(root, "node_modules", "@duckdb", pkg), join(out, "server", "node_modules", "@duckdb", pkg), { recursive: true, dereference: true });
 }
 mkdirSync(join(out, "scripts"), { recursive: true });
 cpSync(join(root, "scripts/service.mjs"), join(out, "scripts/service.mjs"));
+cpSync(join(root, "scripts/service-settings.mjs"), join(out, "scripts/service-settings.mjs"));
 
 // ---------------------------------------------------------------- node runtime
 step("Node.js runtime");
 const nodeDir = dirname(process.execPath);
 mkdirSync(join(out, "node"), { recursive: true });
 cpSync(process.execPath, join(out, "node", "node.exe"));
-for (const tool of ["npm", "corepack"]) {
+stageNpm(root, join(out, "node"), manifest.components.npm);
+for (const tool of ["corepack"]) {
   const src = join(nodeDir, "node_modules", tool);
   if (existsSync(src)) cpSync(src, join(out, "node", "node_modules", tool), { recursive: true });
 }
@@ -104,6 +116,7 @@ for (const f of ["LICENSE"]) if (existsSync(join(nodeDir, f))) cpSync(join(nodeD
 
 // ---------------------------------------------------------------- smoke test of the staged app
 step("Smoke test of the staged installation");
+verifyNpm(join(out, "node"));
 const smoke = await import(pathToFileURL(join(out, "server/service-config.mjs")).href);
 if (
   !smoke.renderWinswXml({ installDir: out, nodeExe: "x", entry: "y", home: "z", logDir: "w", port: 1 }).includes("<id>")
@@ -124,6 +137,7 @@ if (!args.includes("--skip-portable")) {
 if (args.includes("--no-installer")) {
   console.log(`\n✔ Staged ${out}`);
   process.exit(0);
+}
 }
 
 // ---------------------------------------------------------------- installer
@@ -160,10 +174,17 @@ execFileSync(process.execPath, [join(root, "node_modules/@tauri-apps/cli/tauri.j
 });
 
 const bundleDir = join(root, "apps/desktop/src-tauri/target/release/bundle/nsis");
-const built = readdirSync(bundleDir).find((f) => f.endsWith("-setup.exe"));
+const built = readdirSync(bundleDir).find((f) => f.endsWith(`_${version}_x64-setup.exe`));
 if (!built) throw new Error("The NSIS installer was not produced.");
 mkdirSync(join(root, "dist"), { recursive: true });
 const target = join(root, "dist", installerName);
-rmSync(target, { force: true });
+// Publish only after the new installer exists. Keep older executables outside dist.
+const previous = readdirSync(join(root, "dist"), { withFileTypes: true }).filter((f) => f.isFile() && /\.exe$/i.test(f.name));
+if (previous.length) {
+  const archive = join(root, ".nexus-dev", "release-archive", `${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID().slice(0, 8)}`);
+  mkdirSync(archive, { recursive: true });
+  for (const file of previous) renameSync(join(root, "dist", file.name), join(archive, file.name));
+  console.log(`Previous installers archived: ${archive}`);
+}
 renameSync(join(bundleDir, built), target);
 console.log(`\n✔ ${target}`);

@@ -9,6 +9,7 @@ import {
   FileCode2,
   Folder,
   FolderOpen,
+  GitBranch,
   Globe2,
   HardDrive,
   KeyRound,
@@ -24,11 +25,13 @@ import {
   XCircle,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { Link, useNavigate } from "react-router";
+import { Link, useNavigate, useSearchParams } from "react-router";
 import type { AccessMode, AppSummary, JobStep } from "@nexus/shared/contracts";
 import type { FriendlyProblem } from "@nexus/shared/errors";
 import { Card, ErrorNote, ProblemCard, Spinner, Status } from "../components/ui";
-import { ApiError, get, post } from "../lib/api";
+import { ApiError, del, get, post } from "../lib/api";
+import { GitHubImport } from "../components/GitHubImport";
+import { EnvFileUpload } from "../components/EnvFileUpload";
 import { useJob, type JobView } from "../lib/hooks";
 
 type Stage = "folder" | "analysis" | "data" | "access" | "deploy" | "ready";
@@ -40,7 +43,7 @@ interface BrowseResult {
   entries: { name: string; path: string; isProject: boolean }[];
 }
 
-interface AnalysisResult {
+export interface AnalysisResult {
   name: string;
   summary: string;
   findings: string[];
@@ -53,7 +56,7 @@ interface AnalysisResult {
   envFile: { files: string[]; settings: { name: string; secret: boolean }[] };
   warnings: string[];
   existingDatabases: { id: string; name: string; provider?: string; transactions?: boolean }[];
-  analysis: { components: unknown[] };
+  analysis: { components: unknown[]; env: { name: string; managed: boolean }[] };
 }
 
 type DataChoice =
@@ -89,14 +92,14 @@ const stages: { key: Stage; label: string }[] = [
   { key: "ready", label: "Ready" },
 ];
 
-function WizardSteps({ stage }: { stage: Stage }) {
+function WizardSteps({ stage, github }: { stage: Stage; github?: boolean }) {
   const current = stages.findIndex((s) => s.key === stage);
   return (
     <ol className="wizard-steps" aria-label="Add application progress">
       {stages.map((s, i) => (
         <li key={s.key} className={i < current ? "done" : i === current ? "active" : ""} aria-current={i === current ? "step" : undefined}>
           <span className="wizard-step-dot">{i < current ? <Check size={13} /> : i + 1}</span>
-          <span>{s.label}</span>
+          <span>{s.key === "folder" && github ? "GitHub" : s.label}</span>
         </li>
       ))}
     </ol>
@@ -192,7 +195,7 @@ function FolderStep({ onAnalyzed }: { onAnalyzed: (path: string, result: Analysi
   );
 }
 
-function AnalysisStep({ analysis, name, setName, settings, setSetting, importEnvFile, setImportEnvFile, onBack, onNext }: { analysis: AnalysisResult; name: string; setName: (n: string) => void; settings: Record<string, string>; setSetting: (name: string, value: string) => void; importEnvFile: boolean; setImportEnvFile: (enabled: boolean) => void; onBack: () => void; onNext: () => void }) {
+function AnalysisStep({ analysis, name, setName, settings, setSetting, importEnvFile, setImportEnvFile, onUploadEnv, onBack, onNext }: { analysis: AnalysisResult; name: string; setName: (n: string) => void; settings: Record<string, string>; setSetting: (name: string, value: string) => void; importEnvFile: boolean; setImportEnvFile: (enabled: boolean) => void; onUploadEnv: (content: string, values: Record<string, string>) => void; onBack: () => void; onNext: () => void }) {
   const recognized = analysis.analysis.components.length > 0;
   const importedNames = new Set(importEnvFile ? analysis.envFile.settings.map((item) => item.name) : []);
   const manualSettings = analysis.settingsNeeded.filter((item) => !importedNames.has(item.name));
@@ -213,7 +216,8 @@ function AnalysisStep({ analysis, name, setName, settings, setSetting, importEnv
         {analysis.envFile.settings.length > 0 && <label className="toggle-row env-import-row" style={{ marginTop: 16 }}><input type="checkbox" checked={importEnvFile} onChange={(e) => setImportEnvFile(e.target.checked)} /><span><strong>Import {analysis.envFile.settings.length} setting{analysis.envFile.settings.length === 1 ? "" : "s"} from {analysis.envFile.files.join(" and ")}</strong><small>Nexus reads the values directly from the selected folder. Secrets are encrypted and their values are never sent to this page.</small><span className="env-setting-names">{analysis.envFile.settings.slice(0, 8).map((item) => <code key={item.name}>{item.name}</code>)}{analysis.envFile.settings.length > 8 && <code>+{analysis.envFile.settings.length - 8} more</code>}</span></span></label>}
         {manualSettings.length > 0 && <div className="notice" style={{ marginTop: 16 }}><div className="row"><KeyRound size={18} /><span><strong>Application settings</strong><br /><span className="small">{importEnvFile ? "Only settings not supplied by the detected .env file are shown." : "Enter the required values before Nexus starts the application."} Optional values can be added later.</span></span></div><div className="settings-form" style={{ marginTop: 14 }}>{manualSettings.map((item) => <label className="field" key={item.name}>{item.name}{item.required ? " (required)" : " (optional)"}<input className="input mono" type={item.secret ? "password" : "text"} autoComplete="off" value={settings[item.name] ?? ""} placeholder={item.exampleValue ?? ""} onChange={(e) => setSetting(item.name, e.target.value)} /></label>)}</div></div>}
         {analysis.warnings.map((warning) => <div className="notice row" style={{ marginTop: 10 }} key={warning}><TriangleAlert size={18} />{warning}</div>)}
-        <div className="wizard-actions"><button className="btn" onClick={onBack}><ArrowLeft size={16} /> Choose another folder</button><span className="spacer" /><button className="btn primary large" disabled={!recognized || !name.trim() || !requiredSettingsReady} onClick={onNext}>Continue <ArrowRight size={17} /></button></div>
+        <EnvFileUpload managed={analysis.analysis.env.filter((item) => item.managed).map((item) => item.name)} onApply={onUploadEnv} />
+        <div className="wizard-actions"><button className="btn" onClick={onBack}><ArrowLeft size={16} /> Choose another source</button><span className="spacer" /><button className="btn primary large" disabled={!recognized || !name.trim() || !requiredSettingsReady} onClick={onNext}>Continue <ArrowRight size={17} /></button></div>
       </Card>
     </>
   );
@@ -330,12 +334,16 @@ const hostLabel = (name: string) =>
 
 export function AddApplication() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [job, setJob] = useState<{ jobId: string; appId: string } | null>(() => savedDeployment());
   const [stage, setStage] = useState<Stage>(() => (job ? "deploy" : "folder"));
   const [sourceDir, setSourceDir] = useState("");
+  const [sourceMode, setSourceMode] = useState<"folder" | "github">(() => searchParams.get("source") === "github" ? "github" : "folder");
+  const [githubImportId, setGithubImportId] = useState<string | null>(null);
   const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
   const [settings, setSettings] = useState<Record<string, string>>({});
   const [importEnvFile, setImportEnvFile] = useState(false);
+  const [envFileContent, setEnvFileContent] = useState<string | undefined>();
   const [name, setName] = useState("");
   const [data, setData] = useState<DataChoice>({ mode: "none" });
   const [access, setAccess] = useState<AccessMode>("private");
@@ -351,6 +359,8 @@ export function AddApplication() {
 
   const ready = useMemo(() => (r: DeployResult) => { sessionStorage.removeItem(PENDING_DEPLOY_KEY); setResult(r); setStage("ready"); }, []);
 
+  useEffect(() => () => { if (githubImportId) void del(`/github/imports/${githubImportId}`).catch(() => {}); }, [githubImportId]);
+
   useEffect(() => {
     if (!deploymentInProgress) return;
     const keepOpen = (event: BeforeUnloadEvent) => {
@@ -361,10 +371,12 @@ export function AddApplication() {
     return () => window.removeEventListener("beforeunload", keepOpen);
   }, [deploymentInProgress]);
 
-  function analyzed(path: string, found: AnalysisResult) {
+  function analyzed(path: string, found: AnalysisResult, importId: string | null = null) {
+    setGithubImportId(importId);
     setSourceDir(path);
     setAnalysis(found);
     setSettings({});
+    setEnvFileContent(undefined);
     setImportEnvFile(found.envFile.settings.length > 0);
     setName(found.name);
     setData(found.database.required ? { mode: "new" } : { mode: "none" });
@@ -376,7 +388,9 @@ export function AddApplication() {
     setCreating(true);
     setCreateError(null);
     try {
-      const created = await post<{ appId: string; jobId: string }>("/apps", { sourceDir, name: name.trim(), data, access, domain: access === "private" ? null : domain, importEnvFile, settings: Object.fromEntries(Object.entries(settings).filter(([, value]) => value.trim())) });
+      const created = await post<{ appId: string; jobId: string }>("/apps", { ...(githubImportId ? { githubImportId } : { sourceDir }), name: name.trim(), data, access, domain: access === "private" ? null : domain, importEnvFile, envFileContent, settings: Object.fromEntries(Object.entries(settings).filter(([, value]) => value.trim())) });
+      setEnvFileContent(undefined); setSettings({});
+      setGithubImportId(null);
       sessionStorage.setItem(PENDING_DEPLOY_KEY, JSON.stringify(created));
       setJob(created);
       setStage("deploy");
@@ -387,10 +401,10 @@ export function AddApplication() {
 
   return (
     <div className={`add-app-page${deploymentInProgress ? " deployment-focus" : ""}`}>
-      <div className="add-app-top"><button className="btn ghost" disabled={deploymentInProgress} title={deploymentInProgress ? "Wait for deployment to finish" : undefined} onClick={() => { sessionStorage.removeItem(PENDING_DEPLOY_KEY); navigate(-1); }}><ArrowLeft size={17} /> {deploymentInProgress ? "Deployment in progress" : "Exit"}</button><WizardSteps stage={stage} /><span className="wizard-top-spacer" /></div>
+      <div className="add-app-top"><button className="btn ghost" disabled={deploymentInProgress} title={deploymentInProgress ? "Wait for deployment to finish" : undefined} onClick={() => { sessionStorage.removeItem(PENDING_DEPLOY_KEY); navigate(-1); }}><ArrowLeft size={17} /> {deploymentInProgress ? "Deployment in progress" : "Exit"}</button><WizardSteps stage={stage} github={sourceMode === "github"} /><span className="wizard-top-spacer" /></div>
       <div className="add-app-content">
-        {stage === "folder" && <FolderStep onAnalyzed={analyzed} />}
-        {stage === "analysis" && analysis && <AnalysisStep analysis={analysis} name={name} setName={setName} settings={settings} setSetting={(setting, value) => setSettings((current) => ({ ...current, [setting]: value }))} importEnvFile={importEnvFile} setImportEnvFile={setImportEnvFile} onBack={() => setStage("folder")} onNext={() => setStage("data")} />}
+        {stage === "folder" && <><div className="tabs" role="tablist" aria-label="Application source"><button role="tab" aria-selected={sourceMode === "folder"} className={`tab ${sourceMode === "folder" ? "active" : ""}`} onClick={() => setSourceMode("folder")}><FolderOpen size={16} /> Local Folder</button><button role="tab" aria-selected={sourceMode === "github"} className={`tab ${sourceMode === "github" ? "active" : ""}`} onClick={() => setSourceMode("github")}><GitBranch size={16} /> GitHub Repository</button></div>{sourceMode === "folder" ? <FolderStep onAnalyzed={analyzed} /> : <GitHubImport onAnalyzed={(project) => analyzed(project.sourceDir, project.analysis, project.importId)} />}</>}
+        {stage === "analysis" && analysis && <AnalysisStep analysis={analysis} name={name} setName={setName} settings={settings} setSetting={(setting, value) => setSettings((current) => ({ ...current, [setting]: value }))} importEnvFile={importEnvFile} setImportEnvFile={setImportEnvFile} onUploadEnv={(content, values) => { setEnvFileContent(content); setSettings((current) => ({ ...current, ...values })); }} onBack={() => setStage("folder")} onNext={() => setStage("data")} />}
         {stage === "data" && analysis && <DataStep analysis={analysis} choice={data} setChoice={setData} onBack={() => setStage("analysis")} onNext={() => setStage("access")} />}
         {stage === "access" && analysis && <><AccessStep access={access} setAccess={setAccess} domain={domain} setDomain={setDomain} recommended={analysis.externalAccessRecommended} onBack={() => setStage("data")} onDeploy={() => void deploy()} deploying={creating} /><ErrorNote error={createError} /></>}
         {stage === "deploy" && job && <DeployStep {...job} job={deploymentJob} onReady={ready} />}

@@ -54,6 +54,7 @@ export class MonitoringManager {
       appPids: () => { appId: string; pid: number }[];
       intervalMs?: number;
       logger?: Logger;
+      onSample?: (snapshot: SystemSnapshot, apps: AppUsage[]) => void;
     },
   ) {
     this.log = opts.logger ?? silentLogger;
@@ -147,6 +148,7 @@ export class MonitoringManager {
         this.prevApp.delete(id);
       }
     }
+    this.opts.onSample?.(snap, [...this.appUsage.values()]);
     return snap;
   }
 

@@ -1,6 +1,6 @@
 import { Readable } from "node:stream";
 import { z } from "zod";
-import { AppTokens, authorize } from "@nexus/security";
+import { AppTokens, authorize, RateLimiter } from "@nexus/security";
 import { downloadHeaders } from "@nexus/storage";
 import { BRAND, NexusError } from "@nexus/shared";
 import type { RouteModule } from "../server";
@@ -36,11 +36,16 @@ button{margin-top:20px;width:100%;padding:11px;border:0;border-radius:10px;backg
 
 function safeReturn(v: unknown): string {
   const s = typeof v === "string" ? v : "/";
-  return s.startsWith("/") && !s.startsWith("//") && !s.startsWith("/.nexus") ? s : "/";
+  // Browsers normalize backslashes to slashes; /\\evil.example is an external redirect.
+  return s.startsWith("/") && !s.startsWith("//") && !s.startsWith("/.nexus") && !/[\\\x00-\x20\x7f]/.test(s) ? s : "/";
 }
 
 export function appApiRoutes(apps: AppManager): RouteModule {
   return async (app, ctx) => {
+    const failedAuthorization = new RateLimiter(120, 2);
+    const recordDeniedAuthorization = (ip: string) => {
+      if (!failedAuthorization.take(ip).allowed) throw new NexusError("rate_limited", "Too many unsuccessful authorization attempts. Please wait a minute.");
+    };
     // ================= App-facing API (NEXUS_API_TOKEN) =================
     const storage = () => {
       if (!ctx.storage) throw NexusError.conflict("File storage isn't available.");
@@ -182,6 +187,7 @@ export function appApiRoutes(apps: AppManager): RouteModule {
           (req.headers.authorization?.startsWith("Bearer ") ? req.headers.authorization.slice(7) : undefined);
         const principal = ctx.appTokens.verify(Array.isArray(header) ? header[0] : header);
         if (!principal || principal.appId !== appId || !principal.scopes.includes("gateway:api")) {
+          recordDeniedAuthorization(req.clientIp);
           return reply
             .status(401)
             .header("WWW-Authenticate", 'Bearer realm="api"')
@@ -197,6 +203,7 @@ export function appApiRoutes(apps: AppManager): RouteModule {
         return reply.status(200).send();
       }
       const original = String(req.headers["x-forwarded-uri"] ?? "/");
+      recordDeniedAuthorization(req.clientIp);
       return reply.redirect(`/.nexus/login?return=${encodeURIComponent(safeReturn(original))}`, 302);
     });
 
@@ -224,7 +231,12 @@ export function appApiRoutes(apps: AppManager): RouteModule {
       sub.post("/.nexus/login", async (req, reply) => {
         const a = appForHost((req.headers["x-forwarded-host"] as string) ?? req.headers.host);
         if (!a) return reply.status(404).send("Not found");
-        const body = (req.body ?? {}) as Record<string, string>;
+        const body = z.object({
+          username: z.string().min(1).max(64),
+          password: z.string().min(1).max(256),
+          code: z.string().max(20).optional(),
+          return: z.string().max(4096).optional(),
+        }).parse(req.body);
         const back = safeReturn(body.return);
         const fail = (msg: string) =>
           reply

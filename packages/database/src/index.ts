@@ -1,5 +1,6 @@
 export * from "./postgres";
 export * from "./manager";
+export * from "./accounts";
 export * from "./wiring";
 export * from "./browser";
 export * from "./ferretdb";

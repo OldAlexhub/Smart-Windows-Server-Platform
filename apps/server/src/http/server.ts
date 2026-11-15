@@ -5,7 +5,7 @@ import multipart from "@fastify/multipart";
 import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyInstance } from "fastify";
 import { ZodError } from "zod";
-import { RateLimiter } from "@nexus/security";
+import { isLoopback, RateLimiter } from "@nexus/security";
 import { isNexusError, NexusError } from "@nexus/shared";
 import type { NexusContext } from "../context";
 import {
@@ -45,7 +45,10 @@ export async function buildServer(
   await app.register(cookie);
   await app.register(multipart, { limits: { fileSize: 5 * 1024 ** 3, files: 20 } });
 
-  const apiLimiter = new RateLimiter(600, 10); // bursts of 600, 10 req/s sustained per client
+  const publicLimiter = new RateLimiter(600, 100);
+  const userLimiter = new RateLimiter(1200, 200);
+  const appLimiter = new RateLimiter(1200, 200);
+  let capacityForApps = -1;
   app.decorateRequest("principal", null);
   app.decorateRequest("remote", false);
   app.decorateRequest("clientIp", "");
@@ -53,11 +56,36 @@ export async function buildServer(
   app.addHook("onRequest", async (req, reply) => {
     req.remote = isRemoteRequest(req);
     req.clientIp = clientIp(req);
-    req.principal = resolvePrincipal(ctx, req);
     const path = req.url.split("?")[0]!;
+    reply.header("X-Content-Type-Options", "nosniff");
+    reply.header("Referrer-Policy", "no-referrer");
+    reply.header("X-Frame-Options", "SAMEORIGIN");
+    // A hostile site resolving to loopback must not become a local management origin.
+    // App sign-in pages have their own public host and are checked separately below.
+    if (!req.remote && !path.startsWith("/.nexus/")) {
+      let hostname = "";
+      try { hostname = new URL(`http://${req.headers.host ?? ""}`).hostname.replace(/^\[|\]$/g, ""); } catch { /* refused below */ }
+      if (hostname !== "localhost" && !isLoopback(hostname)) throw NexusError.forbidden("Use the local Nexus address to open the control center.");
+    }
     if (!path.startsWith("/api/") && !path.startsWith("/.nexus/")) return; // static UI
+    reply.header("Cache-Control", "no-store");
 
-    const rl = apiLimiter.take(`${req.clientIp}`);
+    // Authenticate before choosing a bucket so apps behind the same gateway do not
+    // share one cap. Published application traffic never passes through this API,
+    // apart from its authorization check, which uses the public abuse limit.
+    req.principal = resolvePrincipal(ctx, req);
+    const count = Math.max(1, ctx.appPidsProvider().length);
+    if (count !== capacityForApps) {
+      userLimiter.configure(Math.max(1200, count * 240), Math.max(200, count * 40));
+      capacityForApps = count;
+    }
+    const rl = path === "/api/v1/gateway/authorize"
+      ? { allowed: true, retryAfterMs: 0 }
+      : req.principal?.kind === "user"
+      ? userLimiter.take(req.principal.user.id)
+      : req.principal?.kind === "app"
+        ? appLimiter.take(req.principal.app.appId)
+        : publicLimiter.take(req.clientIp);
     if (!rl.allowed) {
       reply.header("Retry-After", Math.ceil(rl.retryAfterMs / 1000));
       throw new NexusError("rate_limited", "Too many requests. Please wait a moment.");
@@ -77,9 +105,16 @@ export async function buildServer(
       if (path.startsWith("/.nexus/")) {
         const origin = req.headers.origin;
         const host = String(req.headers["x-forwarded-host"] ?? req.headers.host ?? "");
-        if (origin && new URL(origin).host !== host) throw NexusError.forbidden("Cross-site sign-in is not allowed.");
+        let sameOrigin = false;
+        try {
+          const parsed = new URL(origin ?? "");
+          sameOrigin = ["http:", "https:"].includes(parsed.protocol) && parsed.host === host && !parsed.username && !parsed.password;
+        } catch { /* malformed or absent origins fail closed */ }
+        if (!sameOrigin) throw NexusError.forbidden("Cross-site sign-in is not allowed.");
       } else if (req.headers[CSRF_HEADER] !== "1") {
         throw NexusError.forbidden("This request is missing its security header.");
+      } else if (req.headers["sec-fetch-site"] === "cross-site") {
+        throw NexusError.forbidden("Cross-site requests are not allowed.");
       }
     }
     if (!req.principal && !PUBLIC.some((re) => re.test(path))) throw NexusError.unauthorized();

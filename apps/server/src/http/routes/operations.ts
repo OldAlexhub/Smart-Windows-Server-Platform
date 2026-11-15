@@ -89,9 +89,10 @@ export function operationsRoutes(apps: AppManager, backups: BackupService): Rout
       requirePermission(req, "app.configure", id);
       const policy = z
         .object({
+            replacePrevious: z.boolean().default(true),
           enabled: z.boolean(),
           frequency: z.enum(["daily", "weekly", "custom"]),
-          time: z.string().regex(/^\d{1,2}:\d{2}$/),
+            time: z.string().regex(/^(?:[01]?\d|2[0-3]):[0-5]\d$/),
           weekday: z.number().int().min(0).max(6).optional(),
           intervalHours: z.number().int().min(1).max(168).optional(),
           retention: z.object({ daily: z.number().int().min(1).max(60), weekly: z.number().int().min(0).max(52), monthly: z.number().int().min(0).max(36), manual: z.number().int().min(1).max(100), preRestoreDays: z.number().int().min(1).max(365) }),

@@ -3,9 +3,10 @@ import { useRef, useState } from "react";
 import { ApiError, del, post, put } from "../lib/api";
 import { useApi } from "../lib/hooks";
 import { Card, ErrorNote, Modal, Spinner } from "./ui";
+import { GitHubSource } from "./GitHubSource";
 
 interface Delivery {
-  source: { dir: string; uploaded: boolean; exists: boolean };
+  source: { dir: string; uploaded: boolean; exists: boolean; github?: { repository: string; branch: string; enabled: boolean } | null };
   autoDeploy: boolean;
   deployKey: { enabled: boolean; createdAt: string | null; url: string };
   pendingChanges: number;
@@ -85,8 +86,8 @@ export function DeliveryCard({ appId, onJob }: { appId: string; onJob: (jobId: s
       <div className="delivery-source">
         {data.source.uploaded ? <PackageOpen size={18} /> : <FolderOpen size={18} />}
         <span>
-          <small>{data.source.uploaded ? "Code comes from the last uploaded zip" : "Code comes from this folder"}</small>
-          <code>{data.source.dir}</code>
+          <small>{data.source.github ? "Connected GitHub source" : data.source.uploaded ? "Code comes from the last uploaded zip" : "Code comes from this folder"}</small>
+          <code>{data.source.github ? `${data.source.github.repository} · ${data.source.github.branch}` : data.source.dir}</code>
           {!data.source.exists && <small className="warn-text">This folder can't be found. Upload a new version, or put the folder back.</small>}
           {data.pendingChanges > 0 && !data.updating && <small className="accent-text">{data.pendingChanges} file{data.pendingChanges === 1 ? "" : "s"} changed since the last deploy. Press <strong>Deploy Latest</strong> to put them live.</small>}
           {data.updating && <small className="accent-text">Updating now…</small>}
@@ -105,7 +106,7 @@ export function DeliveryCard({ appId, onJob }: { appId: string; onJob: (jobId: s
           <span><strong><RefreshCw size={14} /> Update automatically when files in this folder change</strong><small>Save your code or run <code>git pull</code> in the folder and it goes live on its own. Nexus waits until the files have stopped changing for 20 seconds, and never retries a version that failed until you change the files again.</small></span>
         </label>
       ) : (
-        <p className="small muted">Automatic updates follow a folder on this computer. This app's code now comes from uploads, so use <strong>Upload New Version</strong> or a deploy key.</p>
+        <p className="small muted">{data.source.github ? "Nexus reads this repository directly. Manage the branch and automatic updates in GitHub Settings below. ZIP uploads and deploy keys remain available." : <>Automatic updates follow a folder on this computer. This app's code now comes from uploads, so use <strong>Upload New Version</strong> or a deploy key.</>}</p>
       )}
 
       <div className="delivery-key">
@@ -116,6 +117,7 @@ export function DeliveryCard({ appId, onJob }: { appId: string; onJob: (jobId: s
         </span>
       </div>
       <ErrorNote error={actionError} />
+      <GitHubSource appId={appId} onJob={onJob} onChange={() => void reload()} />
 
       {newKey && cmd && (
         <Modal wide title="Your deploy key" onClose={() => setNewKey(null)} footer={<button className="btn primary" onClick={() => setNewKey(null)}>Done</button>}>

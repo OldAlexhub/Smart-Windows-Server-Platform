@@ -8,6 +8,7 @@
     "./brand": "./src/brand.ts",
     "./format": "./src/format.ts",
     "./contracts": "./src/contracts.ts",
-    "./errors": "./src/errors.ts"
+    "./errors": "./src/errors.ts",
+    "./env-file": "./src/env-file.ts"
   }
 }

@@ -79,6 +79,10 @@ export class AppSupervisor extends EventEmitter<SupervisorEvents> {
   get startedAt(): number | null {
     return this.proc?.running ? this.proc.startedAt : null;
   }
+
+  setMemoryPressure(idleUnderPressure: boolean): void {
+    if (this.config.resources.memoryLimitMb === "auto") this.proc?.setMemoryPressure?.(idleUnderPressure);
+  }
   get lastExitInfo(): ExitInfo | null {
     return this.lastExit;
   }

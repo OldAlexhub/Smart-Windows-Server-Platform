@@ -1,4 +1,5 @@
 import { timingSafeEqual } from "node:crypto";
+import { isIP } from "node:net";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { authorize, isLoopback, type AppPrincipal, type Permission, type Session, type User } from "@nexus/security";
 import { NexusError } from "@nexus/shared";
@@ -28,7 +29,7 @@ export function clientIp(req: FastifyRequest): string {
   const fwd = req.headers["x-forwarded-for"];
   const first = (Array.isArray(fwd) ? fwd[0] : fwd)?.split(",")[0]?.trim();
   // Only trust forwarding headers when the connection itself is local (i.e. from our gateway).
-  return first && isLoopback(req.socket.remoteAddress ?? "") ? first : (req.socket.remoteAddress ?? "unknown");
+  return first && isIP(first) && isLoopback(req.socket.remoteAddress ?? "") ? first : (req.socket.remoteAddress ?? "unknown");
 }
 
 export interface RemoteAdminSettings {
@@ -60,7 +61,9 @@ export function isPrivateNetworkRequest(ctx: NexusContext, req: FastifyRequest):
   if (!ctx.settings.get<{ enabled?: boolean }>("privateNetwork", {}).enabled) return false;
   const marker = ctx.vault.get("system/private-network/marker");
   const got = firstHeader(req.headers["x-nexus-private-network"]);
-  return !!marker && got.length === marker.length && timingSafeEqual(Buffer.from(got), Buffer.from(marker));
+  const expected = Buffer.from(marker ?? "");
+  const received = Buffer.from(got);
+  return expected.length > 0 && received.length === expected.length && timingSafeEqual(received, expected);
 }
 
 /**

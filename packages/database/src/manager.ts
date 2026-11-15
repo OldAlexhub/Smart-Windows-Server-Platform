@@ -85,6 +85,7 @@ export class DatabaseManager {
   /** One-time hardening of the cluster itself. Safe to call repeatedly. */
   async hardenCluster(): Promise<void> {
     await this.engine.adminQuery("REVOKE CONNECT ON DATABASE postgres FROM PUBLIC");
+    await this.engine.adminQuery("REVOKE CONNECT ON DATABASE template1 FROM PUBLIC");
     await this.engine.adminQuery("REVOKE ALL ON SCHEMA public FROM PUBLIC", [], "postgres");
   }
 
@@ -282,10 +283,13 @@ export class DatabaseManager {
       "SELECT app_id, login_role FROM database_access WHERE database_id = ?",
       [databaseId],
     );
+    const connectionAccounts = this.store.get("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'database_connection_accounts'")
+      ? this.store.all<{ username: string }>("SELECT username FROM database_connection_accounts WHERE database_id = ?", [databaseId]) : [];
     const admin = await this.engine.adminClient();
     try {
       const qi = (s: string) => admin.escapeIdentifier(s);
       await admin.query(`DROP DATABASE IF EXISTS ${qi(db.dbName)} WITH (FORCE)`);
+      for (const account of connectionAccounts) await admin.query(`DROP ROLE IF EXISTS ${qi(account.username)}`);
       for (const a of access) await admin.query(`DROP ROLE IF EXISTS ${qi(a.login_role)}`);
       await admin.query(`DROP ROLE IF EXISTS ${qi(sqlConsoleRole(databaseId))}`);
       await admin.query(`DROP ROLE IF EXISTS ${qi(db.readonlyRole)}`);
@@ -294,6 +298,7 @@ export class DatabaseManager {
       await admin.end();
     }
     for (const a of access) this.vault.delete(secretName(databaseId, a.app_id));
+    for (const account of connectionAccounts) this.vault.delete(`db:${databaseId}/connection:${account.username}/password`);
     this.vault.delete(sqlConsoleSecretName(databaseId));
     this.store.run("DELETE FROM databases WHERE id = ?", [databaseId]);
   }

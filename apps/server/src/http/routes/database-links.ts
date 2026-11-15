@@ -11,6 +11,35 @@ export function databaseLinkRoutes(links: DatabaseLinkService): RouteModule {
     const audit = (by: { id: string; displayName: string }, action: string, id: string) =>
       ctx.audit.record({ actor: { type: "user", id: by.id, name: by.displayName }, action, target: { type: "database", id } });
 
+    app.get("/api/v1/database-links/tables/:id/accounts", async (req) => {
+      requirePermission(req, "server.settings");
+      const { id } = req.params as { id: string };
+      return links.accounts().list(id);
+    });
+    app.post("/api/v1/database-links/tables/:id/accounts", async (req) => {
+      const user = requirePermission(req, "server.settings");
+      const { id } = req.params as { id: string };
+      const input = z.object({ username: z.string().min(3).max(50), password: z.string().max(128).optional(), mode: z.enum(["read-only", "read-write"]).default("read-only") }).parse(req.body);
+      const account = await links.accounts().create(id, input);
+      audit(user, "database.account.create", id);
+      return account;
+    });
+    app.post("/api/v1/database-links/tables/:id/accounts/:username/password", async (req) => {
+      const user = requirePermission(req, "server.settings");
+      const { id, username } = req.params as { id: string; username: string };
+      const { password } = z.object({ password: z.string().max(128).optional() }).parse(req.body ?? {});
+      const result = await links.accounts().rotate(id, username, password);
+      audit(user, "database.account.rotate", id);
+      return result;
+    });
+    app.delete("/api/v1/database-links/tables/:id/accounts/:username", async (req) => {
+      const user = requirePermission(req, "server.settings");
+      const { id, username } = req.params as { id: string; username: string };
+      await links.accounts().revoke(id, username);
+      audit(user, "database.account.revoke", id);
+      return { ok: true };
+    });
+
     app.get("/api/v1/database-links/:kind/:id", async (req) => {
       const { kind, id } = params.parse(req.params);
       const reveal = (req.query as { reveal?: string }).reveal === "1";

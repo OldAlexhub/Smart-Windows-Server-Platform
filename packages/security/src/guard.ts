@@ -1,3 +1,4 @@
+import { isIP } from "node:net";
 import type { Migration, StateStore } from "@nexus/state";
 
 // ---------------------------------------------------------------------------
@@ -12,17 +13,36 @@ export interface RateLimitDecision {
 
 export class RateLimiter {
   private readonly buckets = new Map<string, { tokens: number; updated: number }>();
+  private nextSweep = 0;
 
   constructor(
-    private readonly capacity: number,
-    private readonly refillPerSecond: number,
+    private capacity: number,
+    private refillPerSecond: number,
     private readonly now: () => number = Date.now,
+    private readonly maxBuckets = 10_000,
   ) {}
+
+  /** Change capacity without resetting depleted buckets when the app count changes. */
+  configure(capacity: number, refillPerSecond: number): void {
+    if (!Number.isFinite(capacity) || capacity <= 0 || !Number.isFinite(refillPerSecond) || refillPerSecond <= 0) throw new Error("Invalid rate limit.");
+    const delta = Math.max(0, capacity - this.capacity);
+    for (const b of this.buckets.values()) b.tokens = Math.min(capacity, b.tokens + delta);
+    this.capacity = capacity;
+    this.refillPerSecond = refillPerSecond;
+  }
 
   take(key: string, cost = 1): RateLimitDecision {
     const t = this.now();
+    if (t >= this.nextSweep) {
+      this.sweep();
+      this.nextSweep = t + 60_000;
+    }
+    // Do not evict active clients: rotating addresses must not reset their limits.
+    if (!this.buckets.has(key) && this.buckets.size >= this.maxBuckets) {
+      return { allowed: false, remaining: 0, retryAfterMs: 60_000 };
+    }
     const b = this.buckets.get(key) ?? { tokens: this.capacity, updated: t };
-    b.tokens = Math.min(this.capacity, b.tokens + ((t - b.updated) / 1000) * this.refillPerSecond);
+    b.tokens = Math.min(this.capacity, b.tokens + (Math.max(0, t - b.updated) / 1000) * this.refillPerSecond);
     b.updated = t;
     this.buckets.set(key, b);
     if (b.tokens >= cost) {
@@ -199,5 +219,6 @@ export class LoginGuard {
 }
 
 export function isLoopback(ip: string): boolean {
-  return ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1" || ip.startsWith("127.");
+  const address = ip.toLowerCase().replace(/^::ffff:/, "");
+  return address === "::1" || (isIP(address) === 4 && address.startsWith("127."));
 }

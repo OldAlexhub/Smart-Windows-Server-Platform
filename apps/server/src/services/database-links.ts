@@ -1,5 +1,6 @@
 import { FirewallManager, serverAddress, subnetCidr, SubnetRelay } from "@nexus/network";
 import { NexusError } from "@nexus/shared";
+import { DatabaseAccountManager } from "@nexus/database";
 import type { NexusContext } from "../context";
 import type { PrivateNetworkService } from "./private-network";
 
@@ -37,6 +38,12 @@ export interface DatabaseLink {
  */
 export class DatabaseLinkService {
   private readonly relays = new Map<string, SubnetRelay>();
+  private accountManager: DatabaseAccountManager | null = null;
+
+  accounts(): DatabaseAccountManager {
+    if (!this.ctx.postgres || !this.ctx.databases) throw NexusError.conflict("The database server isn't running.");
+    return this.accountManager ??= new DatabaseAccountManager(this.ctx.store, this.ctx.vault, this.ctx.postgres, this.ctx.databases);
+  }
 
   constructor(
     private readonly ctx: NexusContext,

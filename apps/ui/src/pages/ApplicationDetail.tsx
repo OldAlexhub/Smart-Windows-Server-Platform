@@ -1,3 +1,4 @@
+import { EnvFileUpload } from "../components/EnvFileUpload";
 import {
   Activity,
   Archive,
@@ -248,6 +249,11 @@ function SettingsTab({ app, canConfigure, canAccess, canDelete, reload }: { app:
         </Card>
       )}
       <Card title="Application Settings" sub="Secret values are encrypted and remain hidden">
+        {canConfigure && <EnvFileUpload appId={app.id} disabled={!!saving} onApply={async (content) => {
+          const result = await post<{ imported: string[] }>(`/apps/${app.id}/env-file/upload`, { content, preview: false });
+          await reload(); await reloadEnvFile();
+          setNote({ text: `Saved ${result.imported.length} settings. ${app.name} will use them when it next starts.`, restart: app.status !== "stopped" });
+        }} />}
         {app.settings.length > 0 && <div className="setting-list">{app.settings.map((setting) => <div className="setting-row" key={setting.name}><span><strong className="mono">{setting.name}</strong><small>{setting.secret ? "Encrypted secret" : "Configuration"}</small></span><code>{setting.value}</code>{canConfigure && <button className="btn ghost small danger" disabled={!!saving} onClick={() => void saveSetting(setting.name, null)}>Remove</button>}</div>)}</div>}
         {canConfigure ? <div className="new-setting"><label className="field">Name<input className="input mono" value={newName} onChange={(e) => setNewName(e.target.value.toUpperCase())} placeholder="SETTING_NAME" /></label><label className="field">Value<input className="input" type={/SECRET|PASSWORD|TOKEN|KEY|_URL$/.test(newName) ? "password" : "text"} value={newValue} onChange={(e) => setNewValue(e.target.value)} /></label><button className="btn" disabled={!newName || !newValue || !!saving} onClick={() => void saveSetting(newName, newValue)}><Plus size={15} /> Add Setting</button></div> : <p className="secondary">Your role cannot change settings.</p>}
         <ErrorNote error={error} />

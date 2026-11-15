@@ -230,6 +230,7 @@ A database is like a **notebook full of tables**. Each table is a page with rows
 - **Back it up:** press **Backup** on the database page.
 - **Connect another program:** the **Connections** section shows the connection details.
 - **Use it from another computer:** at the bottom of the database page, **Connect from another server → Share** gives you a link that works only inside your private network (WireGuard). The other computer joins the private network as a device, then uses the link. Nothing opens to the internet.
+- **Individual database accounts:** after sharing a table database, use **Connection accounts → Add account**. Choose a username, generate or enter a password, and select read-only or read/write access. These accounts can access that database's public tables; they cannot administer its schema. Install the PostgreSQL ODBC driver on the connecting computer for ODBC tools. Password rotation and revocation close that account's active sessions without changing app logins.
 - **Delete a database:** open it and scroll to the bottom → **Delete database** → type its name → **Delete Database**. This can't be undone.
   - If an app still uses it, Nexus says **In use by …** and won't delete it. Remove that app first (app → **Overview → Remove**), then delete the database.
   - The same works for **document databases**.
@@ -328,6 +329,10 @@ In the pipeline's **Settings**, choose when Nexus should tell you: when it fails
 
 Nexus makes backups **automatically** after an app's first deployment. You don't have to remember!
 
+Each new app backup includes its deployed code and releases, app-owned files, managed database, uploaded files and their catalog, and app settings. SQLite files use a consistent online snapshot, including committed WAL data. External databases and files linked outside the app folder require their own supported export; Nexus reports these cases instead of calling an incomplete copy successful.
+
+By default, **Keep only latest successful backup** replaces the previous restore point only after the new one passes verification. A failed backup leaves the old good copy intact. Creation temporarily needs space for staging and both archives. Restoring also creates a safety backup; the next successful regular backup applies the selected retention setting.
+
 - **See them:** click **Backups**. **Protected** means an app is safe.
 - **Make one now:** open an app's **Backups** tab → **Manual backup**.
 - **Change how often:** in **Automatic backups**, choose **Daily**, **Weekly** or a **Custom interval**, the **Time**, and how many restore points to keep (**Keep restore points**).
@@ -337,6 +342,22 @@ Nexus makes backups **automatically** after an app's first deployment. You don't
   3. ⚠️ **Current data will be replaced.** Nexus asks before doing it.
 
 Backups are locked with your **Server Recovery Key** (AES-256 encryption) and checked after every backup (**Verified after every backup**).
+
+### Optional GitHub updates
+
+You can upload a local **.env** file during application setup or from **Application Settings → Upload .env file**. Review the setting names and replacements, then apply them. Nexus skips its managed settings, encrypts secret values, and accepts quoted, multiline and empty values. For an existing application, restart it after saving to use the new settings; frontend values also require a new deployment to rebuild the frontend.
+
+Connect your GitHub account once in **Settings → GitHub → Connect GitHub**. Copy the one-time code, open GitHub, sign in, and approve the GitHub CLI authorization. Nexus saves the connection securely and keeps it across server restarts. Account changes, reconnection and disconnection are managed in this Settings section.
+
+For every new project, open **Add Application → GitHub Repository** and simply choose from your repositories. You can also use **Choose a repository for a new application** in GitHub Settings. Your public and private repositories load automatically, including all pages of results; no additional sign-in is requested. Search and select a repository, check its default branch, and press **Read Repository**. Nexus downloads and analyzes the project; continue through the usual database and access steps and press **Deploy Application**. No personal access token, API key, local Git installation or manual clone is required. Organization repositories require your organization's approval where applicable.
+
+**Automatically deploy new pushes** is on by default for this GitHub setup. Nexus checks the selected branch every two minutes by default (adjustable), pulls the latest commit and deploys it. Local-folder projects keep the original **Local Folder** option and are not connected to GitHub automatically. Unfinished GitHub imports expire after one hour or a Nexus restart; analyze the repository again if needed.
+
+In an application's existing **Updates** panel, choose **Choose GitHub repository** (or **Repository settings** for an existing connection) and select a repository and branch using your saved account. If no account is connected yet, the picker links to **Settings → GitHub**. Enable automatic deployment and choose the check interval (default two minutes). Nexus checks outbound, so you do not need to expose a webhook or the control center to the internet. GitHub shows the permissions requested by the official GitHub CLI (these include broader repository permissions); Nexus uses the connection only to read repositories and code. The authorization is stored in Nexus's encrypted vault and never sent to the control-center browser. Each Nexus user has their own GitHub connection. Disconnecting the account in Settings leaves existing application's saved connections working; disconnect each app in its Updates panel or revoke GitHub CLI access on GitHub to remove those too. Existing token-based app connections continue to work.
+
+While the app is running, the next check deploys the latest selected-branch commit through the normal deployment process. Several pushes between checks deploy as one latest version. A failed version is not retried automatically until a new commit arrives; **Deploy Branch Now** retries explicitly. Database migrations and apps that require a fixed port retain the existing deployment limitations. Submodules and Git LFS objects are not downloaded separately.
+
+Local folders, ZIP uploads and deploy keys remain available. Connecting GitHub does not move or delete the original local folder. Disconnecting selects that folder again when it still exists, without replacing the running release until you deploy. Local folder watching and GitHub automatic updates run one at a time. Restoring a backup pauses its saved GitHub automation so it cannot immediately overwrite the restored code.
 
 ---
 

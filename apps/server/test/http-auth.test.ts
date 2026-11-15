@@ -51,6 +51,27 @@ async function localLogin(): Promise<string> {
 }
 
 describe("HTTP security", () => {
+  it("does not make apps behind the same IP compete for one API budget", async () => {
+    const tokens = [ctx.appTokens.issue("burst-a", "A"), ctx.appTokens.issue("burst-b", "B")];
+    for (let i = 0; i < 650; i++) {
+      for (const { token } of tokens) {
+        const response = await app.inject({ url: "/api/v1/test/app-only", headers: { authorization: `Bearer ${token}` } });
+        expect(response.statusCode).toBe(200);
+      }
+    }
+  });
+  it("rejects DNS rebinding and cross-site writes without changing normal local sign-in", async () => {
+    const cookie = await localLogin();
+    for (const host of ["attacker.example", "127.attacker.example"]) {
+      expect((await app.inject({ url: "/api/v1/auth/me", headers: { host, cookie } })).statusCode).toBe(403);
+    }
+    const blocked = await app.inject({ method: "POST", url: "/api/v1/test/echo", headers: { cookie, ...CSRF, "sec-fetch-site": "cross-site" } });
+    expect(blocked.statusCode).toBe(403);
+    const local = await app.inject({ url: "/api/v1/auth/me", headers: { cookie } });
+    expect(local.statusCode).toBe(200);
+    expect(local.headers["cache-control"]).toBe("no-store");
+    expect(local.headers["x-content-type-options"]).toBe("nosniff");
+  });
   it("health is public; everything else needs a session", async () => {
     expect((await app.inject({ url: "/api/v1/health" })).json()).toMatchObject({ status: "ok", setupCompleted: false });
     const res = await app.inject({ url: "/api/v1/auth/me" });

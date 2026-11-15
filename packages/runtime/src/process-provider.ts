@@ -1,5 +1,7 @@
 import { spawn, execFile, type ChildProcess } from "node:child_process";
 import os from "node:os";
+import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import type { ExitInfo, IsolationProvider, LaunchSpec, ManagedProcess } from "./types";
 
@@ -46,6 +48,10 @@ class ChildManagedProcess implements ManagedProcess {
     return !this.done;
   }
 
+  setMemoryPressure(idleUnderPressure: boolean): void {
+    if (this.running && this.child.stdin?.writable) this.child.stdin.write(idleUnderPressure ? "memory:2\n" : "memory:5\n");
+  }
+
   async stop(graceMs = 8000): Promise<ExitInfo> {
     if (this.done) return this.exited;
     this.stopRequested = true;
@@ -72,6 +78,8 @@ export class ProcessIsolationProvider implements IsolationProvider {
   readonly id = "process";
   readonly label = "Isolated process";
 
+  constructor(private readonly helperPath = join(dirname(process.execPath), "..", "helpers", "NexusProcess.exe")) {}
+
   async available(): Promise<{ available: boolean }> {
     return { available: true };
   }
@@ -84,13 +92,19 @@ export class ProcessIsolationProvider implements IsolationProvider {
       env.NODE_OPTIONS = `${env.NODE_OPTIONS ?? ""} --max-old-space-size=${heap}`.trim();
     }
 
-    const child = spawn(spec.executable, spec.args, {
+    // Only use the helper shipped beside Nexus's own runtime, never one supplied by an app.
+    // Older/source installations retain their existing launch behavior.
+    const governed = process.platform === "win32" && existsSync(this.helperPath);
+    const weight = spec.resources.priority === "high" ? "7" : spec.resources.priority === "low" ? "3" : "5";
+    const child = spawn(governed ? this.helperPath : spec.executable, governed ? [weight, spec.executable, ...spec.args] : spec.args, {
       cwd: spec.cwd,
       env,
       windowsHide: true,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: [governed ? "pipe" : "ignore", "pipe", "pipe"],
       detached: process.platform !== "win32",
     });
+    // The control pipe may close between a monitoring sample and process exit.
+    child.stdin?.on("error", () => {});
 
     await new Promise<void>((resolve, reject) => {
       child.once("spawn", () => resolve());

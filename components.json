@@ -1,6 +1,21 @@
 {
   "$comment": "Third-party runtime components Nexus bundles or installs. Versions are pinned; sha256 is verified after download. Update one component at a time.",
   "components": {
+    "npm": {
+      "version": "11.6.4",
+      "license": "Artistic-2.0",
+      "url": "https://registry.npmjs.org/npm/-/npm-11.6.4.tgz",
+      "sha256": "9c07edca12853cddbf4fed4e372485aa60c064f9bf3e4cd157a2db5518a1792b",
+      "archive": "tar.gz",
+      "stripPrefix": "package"
+    },
+    "github-cli": {
+      "version": "2.104.0",
+      "license": "MIT",
+      "url": "https://github.com/cli/cli/releases/download/v2.104.0/gh_2.104.0_windows_amd64.zip",
+      "sha256": "08c06d10482f12c478018cd259f64acbd5f625712cadf331aad19ba973c879e5",
+      "archive": "zip"
+    },
     "postgresql": {
       "version": "18.4-1",
       "license": "PostgreSQL License",

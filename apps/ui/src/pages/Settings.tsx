@@ -10,8 +10,9 @@ import { ApiError, del, get, patch, post, put } from "../lib/api";
 import { useApi } from "../lib/hooks";
 import { PluginSettings } from "../components/PluginSettings";
 import { PrivateNetwork } from "../components/PrivateNetwork";
+import { GitHubAccountSettings } from "../components/GitHubAccountSettings";
 
-type Tab = "users" | "access" | "security" | "plugins" | "developer";
+type Tab = "users" | "access" | "security" | "github" | "plugins" | "developer";
 type Role = "owner" | "administrator" | "developer" | "operator" | "viewer" | "app_user";
 type AppRole = "administrator" | "developer" | "operator" | "viewer" | "app_user";
 interface User {
@@ -37,6 +38,7 @@ const TAB_INFO: { id: Tab; label: string; icon: typeof Users }[] = [
   { id: "users", label: "People", icon: Users },
   { id: "access", label: "External Access", icon: Globe2 },
   { id: "security", label: "Sign-in & Security", icon: LockKeyhole },
+  { id: "github", label: "GitHub", icon: Code2 },
   { id: "plugins", label: "Plugins", icon: PlugZap },
   { id: "developer", label: "Advanced › Developer", icon: Code2 },
 ];
@@ -310,11 +312,11 @@ export function Settings({ me }: { me: Me }) {
     .filter((item) => item.id !== "plugins" || me.permissions.includes("plugins.manage"))
     .filter((item) => item.id !== "developer" || me.permissions.includes("server.settings") || me.permissions.includes("audit.view")), [me.permissions]);
   const section = location.pathname.split("/").filter(Boolean)[1] ?? "";
-  const routeTab: Tab = section === "network" || section === "domains" ? "access" : section === "security" ? "security" : section === "plugins" ? "plugins" : section === "developer" || section === "storage" ? "developer" : "users";
+  const routeTab: Tab = section === "network" || section === "domains" ? "access" : section === "security" ? "security" : section === "github" ? "github" : section === "plugins" ? "plugins" : section === "developer" || section === "storage" ? "developer" : "users";
   const active = allowed.some((x) => x.id === routeTab) ? routeTab : (allowed[0]?.id ?? "security");
-  const routeFor: Record<Tab, string> = { users: "/settings", access: "/settings/network", security: "/settings/security", plugins: "/settings/plugins", developer: "/settings/developer" };
+  const routeFor: Record<Tab, string> = { users: "/settings", access: "/settings/network", security: "/settings/security", github: "/settings/github", plugins: "/settings/plugins", developer: "/settings/developer" };
   return <>
     <PageHead title="Settings" sub="People, secure access, and advanced server details." />
-    <div className="settings-layout"><nav className="settings-nav" aria-label="Settings sections">{allowed.map(({ id, label, icon: Icon }) => <button key={id} className={active === id ? "active" : ""} onClick={() => navigate(routeFor[id])}><Icon size={17} /><span>{label}</span><ChevronRight size={15} /></button>)}</nav><div className="settings-content stack">{active === "users" ? <UsersPanel me={me} /> : active === "access" ? <AccessPanel me={me} /> : active === "security" ? <SecurityPanel me={me} /> : active === "plugins" ? <PluginSettings /> : <DeveloperPanel me={me} />}</div></div>
+    <div className="settings-layout"><nav className="settings-nav" aria-label="Settings sections">{allowed.map(({ id, label, icon: Icon }) => <button key={id} className={active === id ? "active" : ""} onClick={() => navigate(routeFor[id])}><Icon size={17} /><span>{label}</span><ChevronRight size={15} /></button>)}</nav><div className="settings-content stack">{active === "users" ? <UsersPanel me={me} /> : active === "access" ? <AccessPanel me={me} /> : active === "security" ? <SecurityPanel me={me} /> : active === "github" ? <GitHubAccountSettings canCreateApps={me.permissions.includes("apps.create")} /> : active === "plugins" ? <PluginSettings /> : <DeveloperPanel me={me} />}</div></div>
   </>;
 }

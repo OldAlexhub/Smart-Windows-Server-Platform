@@ -12,6 +12,8 @@ export interface RetentionPolicy {
 }
 
 export interface BackupPolicy {
+  /** Default: replace older restore points only after the new backup is verified. */
+  replacePrevious?: boolean;
   enabled: boolean;
   frequency: "daily" | "weekly" | "custom";
   /** Local time "HH:MM". */
@@ -24,6 +26,7 @@ export interface BackupPolicy {
 }
 
 export const DEFAULT_POLICY: BackupPolicy = {
+  replacePrevious: true,
   enabled: true,
   frequency: "daily",
   time: "03:00",
@@ -66,6 +69,21 @@ export function isOverdue(policy: BackupPolicy, lastRunAt: Date | null, now: Dat
   const periodMs =
     policy.frequency === "custom" ? Math.max(1, policy.intervalHours ?? 24) * 3_600_000 : policy.frequency === "weekly" ? 7 * 86_400_000 : 86_400_000;
   return now.getTime() - lastRunAt.getTime() > periodMs * 1.5;
+}
+
+/** Uses the requested calendar slot or exact interval, including missed runs after downtime. */
+export function isBackupDue(policy: BackupPolicy, lastRunAt: Date | null, now: Date): boolean {
+  if (!policy.enabled) return false;
+  if (!lastRunAt) return true;
+  if (policy.frequency === "custom") return now.getTime() - lastRunAt.getTime() >= Math.max(1, policy.intervalHours ?? 24) * 3_600_000;
+  const [hour, minute] = parseTime(policy.time);
+  const slot = new Date(now);
+  slot.setHours(hour, minute, 0, 0);
+  if (policy.frequency === "weekly") {
+    slot.setDate(slot.getDate() - (slot.getDay() - (policy.weekday ?? 0) + 7) % 7);
+    if (slot > now) slot.setDate(slot.getDate() - 7);
+  } else if (slot > now) slot.setDate(slot.getDate() - 1);
+  return lastRunAt < slot;
 }
 
 export interface BackupRef {

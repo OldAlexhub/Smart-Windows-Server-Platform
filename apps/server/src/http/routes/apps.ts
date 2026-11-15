@@ -62,10 +62,8 @@ export function appRoutes(apps: AppManager, reliability?: ReliabilityService): R
       return { path, parent: p.dir && p.dir !== path ? p.dir : null, isProject: PROJECT_MARKERS.some((m) => existsSync(join(path, m))), entries };
     });
 
-    /** "We found: Node.js + Express backend, React frontend, PostgreSQL requirement, …" */
-    app.post("/api/v1/apps/analyze", async (req) => {
-      requirePermission(req, "apps.create");
-      const { path } = z.object({ path: z.string().min(3) }).parse(req.body);
+    /** The same analysis and setup steps apply to local folders and GitHub checkouts. */
+    const analyze = (path: string) => {
       const a = apps.analyze(path);
       const findings = [
         ...a.components.map(describeComponent),
@@ -93,13 +91,51 @@ export function appRoutes(apps: AppManager, reliability?: ReliabilityService): R
             : (ctx.databases?.list() ?? []).map((d) => ({ id: d.id, name: d.name })),
         analysis: a,
       };
+    };
+
+    app.post("/api/v1/apps/analyze", async (req) => {
+      requirePermission(req, "apps.create");
+      const { path } = z.object({ path: z.string().min(3) }).parse(req.body);
+      return analyze(path);
+    });
+    app.get("/api/v1/github/account", async (req) => {
+      return apps.github.accounts.status(requireUser(req).user.id);
+    });
+    app.post("/api/v1/github/account/login", async (req) => {
+      return apps.github.accounts.start(requireUser(req).user.id);
+    });
+    app.delete("/api/v1/github/account/login", async (req) => {
+      apps.github.accounts.cancel(requireUser(req).user.id);
+      return { ok: true };
+    });
+    app.delete("/api/v1/github/account", async (req) => {
+      apps.github.accounts.disconnect(requireUser(req).user.id);
+      return { ok: true };
+    });
+    app.post("/api/v1/github/repositories", async (req) => {
+      const { user } = requireUser(req);
+      const { token, page } = z.object({ token: z.string().min(1).max(500).optional(), page: z.number().int().min(1).max(100).default(1) }).parse(req.body);
+      return apps.github.repositories(token ?? apps.github.accounts.token(user.id), page);
+    });
+    app.post("/api/v1/github/imports", async (req) => {
+      const user = requirePermission(req, "apps.create");
+      const input = z.object({ repository: z.string().max(250), branch: z.string().max(200), token: z.string().min(1).max(500).optional(), enabled: z.boolean().default(true), intervalMinutes: z.number().int().min(1).max(1440).default(2) }).parse(req.body);
+      const imported = await apps.github.prepareImport({ ...input, token: input.token ?? apps.github.accounts.token(user.id) }, user.id);
+      try { return { ...imported, analysis: analyze(imported.sourceDir) }; }
+      catch (error) { apps.github.cancelImport(imported.importId, user.id); throw error; }
+    });
+    app.delete("/api/v1/github/imports/:id", async (req) => {
+      const user = requirePermission(req, "apps.create");
+      apps.github.cancelImport((req.params as { id: string }).id, user.id);
+      return { ok: true };
     });
 
     app.post("/api/v1/apps", async (req) => {
       const user = requirePermission(req, "apps.create");
       const body = z
         .object({
-          sourceDir: z.string().min(3),
+          sourceDir: z.string().min(3).optional(),
+          githubImportId: z.string().uuid().optional(),
           name: z.string().max(80).optional(),
           data: z.object({
             mode: z.enum(["new", "existing", "external", "none"]),
@@ -110,11 +146,15 @@ export function appRoutes(apps: AppManager, reliability?: ReliabilityService): R
           access: accessSchema,
           domain: z.string().max(253).nullable().optional(),
           importEnvFile: z.boolean().optional(),
-          settings: z.record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/), z.string().max(10_000)).optional(),
+          envFileContent: z.string().max(128 * 1024).optional(),
+          settings: z.record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/), z.string().max(16_384)).optional(),
         })
         .parse(req.body);
       if (body.data.mode === "new" && !authorize(user, "databases.create")) throw NexusError.forbidden("You can't create databases.");
-      return apps.create(body, { id: user.id, name: user.displayName });
+      const actor = { id: user.id, name: user.displayName };
+      if (body.githubImportId) return apps.github.createImported(body.githubImportId, actor, body);
+      if (!body.sourceDir) throw NexusError.invalid("Choose a local folder or import a GitHub repository.");
+      return apps.create({ ...body, sourceDir: body.sourceDir }, actor);
     });
 
     // ---------------- jobs ----------------
@@ -237,6 +277,32 @@ export function appRoutes(apps: AppManager, reliability?: ReliabilityService): R
       const id = (req.params as { id: string }).id;
       requirePermission(req, "app.deploy", id);
       return apps.delivery(id);
+    });
+
+    app.get("/api/v1/apps/:id/github", async (req) => {
+      const { id } = req.params as { id: string };
+      requirePermission(req, "app.deploy", id);
+      return apps.github.status(id);
+    });
+    app.put("/api/v1/apps/:id/github", async (req) => {
+      const { id } = req.params as { id: string };
+      const user = requirePermission(req, "app.deploy", id);
+      const input = z.object({ repository: z.string().max(250), branch: z.string().max(200), enabled: z.boolean(), intervalMinutes: z.number().int().min(1).max(1440), token: z.string().max(500).optional(), useAccount: z.boolean().default(false) }).parse(req.body);
+      const result = await apps.github.configure(id, { ...input, token: input.useAccount ? apps.github.accounts.token(user.id) : input.token });
+      ctx.audit.record({ actor: { type: "user", id: user.id, name: user.displayName }, action: "app.github.configure", target: { type: "app", id }, details: { repository: result?.repository, enabled: input.enabled } });
+      return result;
+    });
+    app.post("/api/v1/apps/:id/github/check", async (req) => {
+      const { id } = req.params as { id: string };
+      requirePermission(req, "app.deploy", id);
+      return apps.github.check(id, true);
+    });
+    app.delete("/api/v1/apps/:id/github", async (req) => {
+      const { id } = req.params as { id: string };
+      const user = requirePermission(req, "app.deploy", id);
+      apps.github.disconnect(id);
+      ctx.audit.record({ actor: { type: "user", id: user.id, name: user.displayName }, action: "app.github.disconnect", target: { type: "app", id } });
+      return { ok: true };
     });
 
     app.put("/api/v1/apps/:id/auto-deploy", async (req) => {
@@ -379,6 +445,15 @@ export function appRoutes(apps: AppManager, reliability?: ReliabilityService): R
       const imported = apps.importEnvFile(id, names);
       ctx.audit.record({ actor: { type: "user", id: user.id, name: user.displayName }, action: "app.settings.import", target: { type: "app", id }, details: { names: imported } });
       return { imported, restartNeeded: imported.length > 0 };
+    });
+
+    app.post("/api/v1/apps/:id/env-file/upload", async (req) => {
+      const id = (req.params as { id: string }).id;
+      const user = requirePermission(req, "app.configure", id);
+      const { content, preview } = z.object({ content: z.string().max(128 * 1024), preview: z.boolean().default(true) }).parse(req.body);
+      const result = apps.uploadEnvFile(id, content, preview);
+      if (!preview) ctx.audit.record({ actor: { type: "user", id: user.id, name: user.displayName }, action: "app.settings.upload", target: { type: "app", id }, details: { names: result.imported, skipped: result.skipped } });
+      return result;
     });
 
     /** Advanced › Developer: ports, runtime, isolation, release, settings, database connection, credentials. */

@@ -273,6 +273,7 @@ export class NexusContext {
     this.monitoring = new MonitoringManager({
       mounts: () => [...new Set(Object.values(dp).map((p) => `${p.slice(0, 2)}\\`))],
       appPids: () => this.appPidsProvider(),
+        onSample: (snapshot, apps) => this.resourceSampleProvider(snapshot.memory, apps),
       logger: this.log.child({ module: "monitoring" }),
     });
     this.monitoring.start();
@@ -296,6 +297,7 @@ export class NexusContext {
 
   /** Set by the application manager so monitoring can see app process trees. */
   appPidsProvider: () => { appId: string; pid: number }[] = () => [];
+  resourceSampleProvider: (memory: { totalBytes: number; usedBytes: number }, apps: { appId: string; cpuPercent: number }[]) => void = () => {};
 
   onStop(fn: () => Promise<void> | void): void {
     this.stopHooks.push(fn);

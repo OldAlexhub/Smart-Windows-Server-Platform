@@ -36,6 +36,8 @@ export interface ManagedProcess {
   readonly exited: Promise<ExitInfo>;
   readonly running: boolean;
   stop(graceMs?: number): Promise<ExitInfo>;
+  /** Soft page-reclamation hint; never a memory allocation cap. */
+  setMemoryPressure?(idleUnderPressure: boolean): void;
 }
 
 /**

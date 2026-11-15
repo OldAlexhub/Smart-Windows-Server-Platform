@@ -9,6 +9,7 @@ import { newId, NexusError, silentLogger, slugify, type Logger } from "@nexus/sh
 import type { Migration, StateStore } from "@nexus/state";
 import { DecryptStream, EncryptStream } from "./crypto-stream";
 import { selectForDeletion, type BackupPolicy, type RetentionPolicy } from "./policy";
+import { snapshotDirectory } from "./snapshot";
 
 export const backupMigrations: Migration[] = [
   {
@@ -51,15 +52,17 @@ export interface BackupTarget {
   /** Document (MongoDB) database; `exportTo` writes its collections into the given folder. */
   documents?: { dbName: string; exportTo: (dir: string) => Promise<unknown> } | null;
   /** Named folders to include, e.g. { name: "storage", path: "D:\\Nexus\\Storage\\taxiops" }. */
-  fileDirs: { name: string; path: string }[];
+  fileDirs: { name: string; path: string; snapshot?: boolean }[];
   /** App settings including secrets; protected by backup encryption. */
   config: Record<string, unknown>;
+  validateFiles?: (filesDirectory: string) => void;
 }
 
 export interface BackupContents {
   database: boolean;
   files: boolean;
   config: boolean;
+  application?: boolean;
 }
 
 export interface BackupRecord {
@@ -89,6 +92,18 @@ export interface BackupManifest {
   documents?: { dbName: string; dir: string; format: "nexus-documents" } | null;
   files: string[];
   config: string | null;
+}
+
+export function validateBackupManifest(value: unknown): BackupManifest {
+  const m = value as BackupManifest;
+  if (!m || m.format !== "nexus-backup" || m.version !== 1 || typeof m.appId !== "string" ||
+      !Array.isArray(m.files) || m.files.some((name) => typeof name !== "string" || !/^[a-z0-9_-]+$/i.test(name)) ||
+      new Set(m.files).size !== m.files.length || (m.config !== null && m.config !== "config/app.json") ||
+      (m.database && (m.database.file !== "database.dump" || m.database.format !== "pg_dump-custom")) ||
+      (m.documents && (m.documents.dir !== "documents" || m.documents.format !== "nexus-documents"))) {
+    throw new Error("The backup manifest is invalid or contains unsafe paths.");
+  }
+  return m;
 }
 
 export interface ProtectionStatus {
@@ -153,6 +168,7 @@ export class BackupManager {
       database: !!target.database || !!target.documents,
       files: target.fileDirs.some((d) => existsSync(d.path)),
       config: true,
+      application: target.fileDirs.some((d) => d.name === "application" && existsSync(d.path)),
     };
     this.store.run("INSERT INTO backups (id, app_id, created_at, trigger, status, contents) VALUES (?, ?, ?, ?, 'running', ?)", [
       id,
@@ -165,7 +181,7 @@ export class BackupManager {
     const staging = join(this.opts.root, ".staging", id);
     const dir = join(this.opts.root, slugify(target.appId));
     const stamp = createdAt.replace(/[:T]/g, "-").replace(/\..+$/, "");
-    const finalPath = join(dir, `${slugify(target.appName)}_${stamp}_${trigger}.nxb`);
+    const finalPath = join(dir, `${slugify(target.appName)}_${stamp}_${trigger}_${id}.nxb`);
     try {
       mkdirSync(join(staging, "files"), { recursive: true });
       mkdirSync(dir, { recursive: true });
@@ -195,7 +211,9 @@ export class BackupManager {
         if (!/^[a-z0-9_-]+$/i.test(d.name)) throw new Error("Invalid backup folder name.");
         // A junction lets tar read the folder in place — no second copy of large file stores. Drives
         // formatted exFAT or FAT32 (common for external backup disks) can't hold junctions: copy instead.
-        try {
+        if (d.snapshot) {
+          await snapshotDirectory(d.path, join(staging, "files", d.name));
+        } else try {
           symlinkSync(d.path, join(staging, "files", d.name), "junction");
         } catch {
           rmSync(join(staging, "files", d.name), { recursive: true, force: true });
@@ -204,6 +222,7 @@ export class BackupManager {
         fileNames.push(d.name);
       }
       if (fileNames.length) entries.push("files");
+      target.validateFiles?.(join(staging, "files"));
 
       mkdirSync(join(staging, "config"), { recursive: true });
       writeFileSync(join(staging, "config", "app.json"), JSON.stringify(target.config, null, 2));
@@ -229,7 +248,7 @@ export class BackupManager {
         },
       });
       await pipeline(
-        tar.create({ cwd: staging, follow: true, portable: true, noMtime: false }, entries),
+        tar.create({ cwd: staging, follow: true, portable: true, noMtime: false, gzip: true }, entries),
         new EncryptStream(this.opts.backupKey),
         tap,
         createWriteStream(`${finalPath}.part`),
@@ -268,6 +287,7 @@ export class BackupManager {
   /** Decrypts and reads the archive index end-to-end; throws if anything is wrong. */
   async verifyFile(path: string, key = this.opts.backupKey): Promise<BackupManifest> {
     let manifest: BackupManifest | null = null;
+    let manifestError: Error | null = null;
     const names: string[] = [];
     await pipeline(
       createReadStream(path),
@@ -277,26 +297,43 @@ export class BackupManager {
           names.push(entry.path);
           if (entry.path === "manifest.json") {
             const chunks: Buffer[] = [];
-            entry.on("data", (c: Buffer) => chunks.push(c));
-            entry.on("end", () => (manifest = JSON.parse(Buffer.concat(chunks).toString("utf8")) as BackupManifest));
+            let bytes = 0;
+            entry.on("data", (c: Buffer) => {
+              bytes += c.length;
+              if (bytes > 1024 * 1024) manifestError = new Error("The backup manifest is too large.");
+              else chunks.push(c);
+            });
+            entry.on("end", () => {
+              try { if (!manifestError) manifest = validateBackupManifest(JSON.parse(Buffer.concat(chunks).toString("utf8"))); }
+              catch (error) { manifestError = error as Error; }
+            });
           } else entry.resume();
         },
       }),
     );
+    if (manifestError) throw manifestError;
     if (!manifest) throw new Error("The backup has no manifest.");
     const m = manifest as BackupManifest;
     if (m.database && !names.includes("database.dump")) throw new Error("The backup is missing its database export.");
     if (m.documents && !names.some((n) => n.replace(/\\/g, "/") === `${m.documents!.dir}/collections.json`)) {
       throw new Error("The backup is missing its document database export.");
     }
+    if (m.config && !names.includes(m.config)) throw new Error("The backup is missing its configuration.");
+    for (const folder of m.files) if (!names.some((name) => name.replace(/\\/g, "/").replace(/\/$/, "") === `files/${folder}`)) throw new Error(`The backup is missing its ${folder} folder.`);
     return m;
   }
 
   /** Decrypts and unpacks a backup into `dest` (used by restore). */
   async extract(path: string, dest: string, key = this.opts.backupKey): Promise<BackupManifest> {
+    await this.verifyFile(path, key);
     mkdirSync(dest, { recursive: true });
-    await pipeline(createReadStream(path), new DecryptStream(key), tar.extract({ cwd: dest, strict: true, preservePaths: false }));
-    return JSON.parse(readFileSync(join(dest, "manifest.json"), "utf8")) as BackupManifest;
+    let unsafeEntry = false;
+    await pipeline(createReadStream(path), new DecryptStream(key), tar.extract({ cwd: dest, strict: true, preservePaths: false, filter: (_path, entry) => {
+      if (!("type" in entry) || (entry.type !== "File" && entry.type !== "Directory")) { unsafeEntry = true; return false; }
+      return true;
+    } }));
+    if (unsafeEntry) throw new Error("The backup contains an unsupported linked entry.");
+    return validateBackupManifest(JSON.parse(readFileSync(join(dest, "manifest.json"), "utf8")));
   }
 
   // ---------------- queries ----------------
@@ -327,7 +364,7 @@ export class BackupManager {
     if (!latest) return { protected: false, latest: null, contents: { database: false, files: false, config: false }, message: "Not backed up yet" };
     const periodH = policy.frequency === "custom" ? policy.intervalHours ?? 24 : policy.frequency === "weekly" ? 168 : 24;
     const fresh = now.getTime() - new Date(latest.createdAt).getTime() < periodH * 1.5 * 3_600_000;
-    const complete = (!expected.database || latest.contents.database) && (!expected.files || latest.contents.files) && latest.contents.config;
+    const complete = (!expected.database || latest.contents.database) && (!expected.files || latest.contents.files) && (!expected.application || !!latest.contents.application) && latest.contents.config;
     return {
       protected: fresh && complete && policy.enabled,
       latest,
@@ -337,9 +374,13 @@ export class BackupManager {
   }
 
   /** Deletes backups outside the retention policy. Never removes the newest successful backup. */
-  applyRetention(appId: string, retention: RetentionPolicy, now = new Date()): number {
+  applyRetention(appId: string, retention: RetentionPolicy, now = new Date(), replacePrevious = false): number {
     const all = this.list(appId);
-    const doomed = selectForDeletion(all, retention, now);
+    const latest = all.find((b) => b.status === "succeeded");
+    // Never remove the old good copy until a new archive has been verified successfully.
+    const doomed = replacePrevious && latest
+      ? all.filter((b) => b.id !== latest.id && b.status !== "running").map((b) => b.id)
+      : selectForDeletion(all, retention, now);
     for (const id of doomed) {
       const b = all.find((x) => x.id === id)!;
       if (b.path) rmSync(b.path, { force: true });

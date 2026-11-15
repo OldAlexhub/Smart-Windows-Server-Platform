@@ -1,8 +1,32 @@
 import { describe, expect, it } from "vitest";
 import { StateStore } from "@nexus/state";
-import { LoginGuard, RateLimiter } from "@nexus/security";
+import { isLoopback, LoginGuard, RateLimiter } from "@nexus/security";
 
 describe("RateLimiter", () => {
+  it("grows with workload while preserving consumed capacity", () => {
+    const limiter = new RateLimiter(2, 1, () => 0);
+    expect(limiter.take("app", 2).allowed).toBe(true);
+    limiter.configure(4, 2);
+    expect(limiter.take("app", 2).allowed).toBe(true);
+    expect(limiter.take("app").allowed).toBe(false);
+    limiter.configure(4, 2);
+    expect(limiter.take("app").allowed).toBe(false);
+  });
+  it("bounds client memory without resetting active limits and recovers after idle clients expire", () => {
+    let now = 0;
+    const limiter = new RateLimiter(1, 1, () => now, 2);
+    expect(limiter.take("a").allowed).toBe(true);
+    expect(limiter.take("b").allowed).toBe(true);
+    expect(limiter.take("c").allowed).toBe(false);
+    expect(limiter.take("a").allowed).toBe(false);
+    now = 11 * 60_000;
+    expect(limiter.take("c").allowed).toBe(true);
+  });
+
+  it("only recognizes actual loopback IP addresses", () => {
+    for (const value of ["127.0.0.1", "127.0.1.2", "::1", "::ffff:127.0.0.1"]) expect(isLoopback(value)).toBe(true);
+    for (const value of ["127.attacker.example", "127.999.0.1", "127.0.0.1.evil", "10.0.0.1"]) expect(isLoopback(value)).toBe(false);
+  });
   it("allows bursts up to capacity then refills over time", () => {
     const clock = { t: 0 };
     const rl = new RateLimiter(3, 1, () => clock.t);

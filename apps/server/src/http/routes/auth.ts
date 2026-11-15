@@ -31,7 +31,7 @@ export const authRoutes: RouteModule = (app, ctx) => {
   }));
 
   app.post("/api/v1/auth/local", async (req, reply) => {
-    const { token } = z.object({ token: z.string().min(10) }).parse(req.body);
+    const { token } = z.object({ token: z.string().min(10).max(256) }).parse(req.body);
     if (req.remote) throw NexusError.forbidden("Local sign-in only works on this computer.");
     if (!constantTimeEqual(token, ctx.localToken)) {
       ctx.audit.record({
@@ -91,6 +91,7 @@ export const authRoutes: RouteModule = (app, ctx) => {
       throw NexusError.forbidden("Two-step verification must be set up on this computer before signing in remotely.");
     }
     if (result.status === "mfa_required") {
+      if (pendingMfa.size >= 1000) throw new NexusError("rate_limited", "Too many sign-in attempts. Please wait a minute.");
       const pending = randomToken(24);
       pendingMfa.set(pending, {
         userId,
@@ -106,7 +107,7 @@ export const authRoutes: RouteModule = (app, ctx) => {
 
   app.post("/api/v1/auth/mfa", async (req, reply) => {
     reply.header("Cache-Control", "no-store");
-    const body = z.object({ pendingToken: z.string(), code: z.string().min(6).max(20) }).parse(req.body);
+    const body = z.object({ pendingToken: z.string().min(1).max(128), code: z.string().min(6).max(20) }).parse(req.body);
     const rl = loginLimiter.take(req.clientIp);
     if (!rl.allowed) throw new NexusError("rate_limited", "Too many sign-in attempts. Please wait a minute.");
     const p = pendingMfa.get(body.pendingToken);

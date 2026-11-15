@@ -126,7 +126,10 @@ describe("gateway authorization", () => {
     const post = (headers: Record<string, string> = {}) =>
       app.inject({ method: "POST", url: "/.nexus/login", headers: { ...host, "content-type": "application/x-www-form-urlencoded", ...headers }, payload: form() });
 
-    const denied = await post();
+    expect((await post()).statusCode).toBe(403);
+    expect((await post({ origin: "null" })).statusCode).toBe(403);
+    expect((await post({ origin: "not-a-url" })).statusCode).toBe(403);
+    const denied = await post({ origin: "https://taxiops.test.example" });
     expect(denied.statusCode).toBe(401);
     expect(denied.body).toContain("doesn&#39;t have access to TaxiOps");
 
@@ -146,8 +149,8 @@ describe("gateway authorization", () => {
     expect((await app.inject({ url: `/api/v1/gateway/authorize?app=${finance}&mode=user`, headers: { ...host, cookie } })).statusCode).toBe(302);
   });
 
-  it("open redirects are not possible", async () => {
-    const r = await app.inject({ url: `/api/v1/gateway/authorize?app=${taxi}&mode=user`, headers: { host: "taxiops.test.example", "x-forwarded-uri": "//evil.example/steal" } });
+  it.each(["//evil.example/steal", "/\\evil.example/steal", "/ /evil.example"])("refuses unsafe redirect %s", async (target) => {
+    const r = await app.inject({ url: `/api/v1/gateway/authorize?app=${taxi}&mode=user`, headers: { host: "taxiops.test.example", "x-forwarded-for": "198.51.100.9", "x-forwarded-uri": target } });
     expect(r.headers.location).toBe("/.nexus/login?return=%2F");
   });
 });
