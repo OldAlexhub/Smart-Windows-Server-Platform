@@ -1,6 +1,6 @@
 import { execFile, spawn } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import pg from "pg";
 import { GiB, MiB, NexusError, silentLogger, type Logger } from "@nexus/shared";
 
@@ -20,9 +20,9 @@ function hasAll(binDir: string): boolean {
 
 /**
  * Finds PostgreSQL binaries: an explicit path, Nexus's bundled copy (vendor/postgresql/<ver>),
- * or an existing PostgreSQL installation. Newest version wins.
+ * or an existing PostgreSQL installation. Prefer the tested bundled version over system installs.
  */
-export function locatePostgresBinaries(opts: { configured?: string | null; bundledRoots?: string[]; programFiles?: string } = {}): PostgresBinaries | null {
+export function locatePostgresBinaries(opts: { configured?: string | null; bundledRoots?: string[]; programFiles?: string; dataRoot?: string } = {}): PostgresBinaries | null {
   if (opts.configured && hasAll(opts.configured)) return { binDir: opts.configured, version: versionFromPath(opts.configured) };
   const candidates: PostgresBinaries[] = [];
   for (const root of opts.bundledRoots ?? []) {
@@ -32,6 +32,7 @@ export function locatePostgresBinaries(opts: { configured?: string | null; bundl
       if (hasAll(bin)) candidates.push({ binDir: bin, version: v });
     }
   }
+  const bundledCount = candidates.length;
   const pf = join(opts.programFiles ?? process.env.ProgramFiles ?? "C:\\Program Files", "PostgreSQL");
   if (existsSync(pf)) {
     for (const v of readdirSync(pf)) {
@@ -39,12 +40,19 @@ export function locatePostgresBinaries(opts: { configured?: string | null; bundl
       if (hasAll(bin)) candidates.push({ binDir: bin, version: v });
     }
   }
-  candidates.sort((a, b) => compareVersions(b.version, a.version));
-  return candidates[0] ?? null;
+  // An existing cluster determines its required major version. Never silently switch its data
+  // to a fresh cluster simply because a bundled/system installation has a different version.
+  const existing = opts.dataRoot && existsSync(opts.dataRoot)
+    ? readdirSync(opts.dataRoot).filter((name) => /^pg\d+$/.test(name) && existsSync(join(opts.dataRoot!, name, "PG_VERSION")))
+    : [];
+  if (existing.length > 1) throw NexusError.conflict("Nexus found multiple existing database versions. Their data has been preserved; contact support to select the active database.");
+  const required = existing[0]?.slice(2);
+  const compatible = (items: PostgresBinaries[]) => items.filter((item) => !required || item.version.split(".")[0] === required).sort((a, b) => compareVersions(b.version, a.version));
+  return compatible(candidates.slice(0, bundledCount))[0] ?? compatible(candidates.slice(bundledCount))[0] ?? null;
 }
 
 function versionFromPath(p: string): string {
-  return p.match(/(\d+(?:\.\d+)*(?:-\d+)?)/)?.[1] ?? "unknown";
+  return basename(dirname(p)).match(/^(\d+(?:\.\d+)*(?:-\d+)?)/)?.[1] ?? "unknown";
 }
 
 function compareVersions(a: string, b: string): number {
@@ -150,7 +158,10 @@ export type EngineState = "not_initialized" | "stopped" | "running";
 function run(file: string, args: string[], env?: NodeJS.ProcessEnv, timeoutMs = 120_000): Promise<{ code: number; out: string }> {
   return new Promise((resolve) => {
     execFile(file, args, { windowsHide: true, timeout: timeoutMs, env: { ...process.env, ...env } }, (err, stdout, stderr) => {
-      resolve({ code: err ? (typeof err.code === "number" ? err.code : 1) : 0, out: `${stdout}${stderr}` });
+      const code = err ? (typeof err.code === "number" ? err.code : 1) : 0;
+      // Loader failures (including missing Windows DLLs) often produce no stdout/stderr.
+      const detail = err ? `\n${basename(file)}: ${err.message}\nExit: ${err.code ?? code}${typeof err.code === "number" ? ` (0x${(err.code >>> 0).toString(16)})` : ""}${err.killed ? " (timed out or terminated)" : ""}${err.signal ? `; signal: ${err.signal}` : ""}` : "";
+      resolve({ code, out: `${stdout}${stderr}${detail}` });
     });
   });
 }
@@ -184,6 +195,7 @@ function runDetachedStart(file: string, args: string[], timeoutMs: number): Prom
  */
 export class PostgresEngine {
   private readonly log: Logger;
+  private initializing?: Promise<void>;
 
   constructor(private readonly opts: PostgresEngineOptions) {
     this.log = opts.logger ?? silentLogger;
@@ -210,7 +222,7 @@ export class PostgresEngine {
   }
 
   isInitialized(): boolean {
-    return existsSync(join(this.opts.dataDir, "PG_VERSION"));
+    return ["PG_VERSION", "global/pg_control", "postgresql.conf", "pg_hba.conf"].every((f) => existsSync(join(this.opts.dataDir, f)));
   }
 
   async state(): Promise<EngineState> {
@@ -221,16 +233,68 @@ export class PostgresEngine {
 
   /** Creates the cluster with a random superuser password (stored only in the Nexus vault). */
   async initialize(): Promise<void> {
-    if (this.isInitialized()) return;
-    mkdirSync(this.opts.dataDir, { recursive: true });
-    const pwfile = join(dirname(this.opts.dataDir), `.pw-${process.pid}-${Date.now()}`);
-    writeFileSync(pwfile, this.opts.superuserPassword, { mode: 0o600 });
+    if (this.initializing) return this.initializing;
+    this.initializing = this.initializeCluster();
     try {
+      await this.initializing;
+    } finally {
+      this.initializing = undefined;
+    }
+  }
+
+  private setupError(technical: string): NexusError {
+    let summary = "Nexus could not finish preparing its database. Try setup again. If it still fails, run the Nexus installer again to repair its components.";
+    if (/0xc0000135|0xc000007b|0xc0000142|ENOENT|missing.*dll/i.test(technical)) {
+      summary = "A required database component could not load. Run the Nexus installer again to repair the required components automatically.";
+    } else if (/ENOSPC|no space left|disk.*full|not enough space/i.test(technical)) {
+      summary = "The database drive has run out of space. Free some space or choose another drive, then try again.";
+    } else if (/EACCES|EPERM|permission denied|access is denied/i.test(technical)) {
+      summary = "Windows blocked access to the database files. Run the Nexus installer again to repair setup, or choose another storage location.";
+    }
+    // Log separately: the general error serializer intentionally includes only Error's standard fields.
+    const safeDetail = technical.replaceAll(this.opts.superuserPassword, "[redacted]");
+    this.log.error("postgres initialization failed", { dataDir: this.opts.dataDir, technical: safeDetail });
+    return new NexusError("infrastructure", "Nexus could not set up the database server.", {
+      problem: { title: "Database setup could not finish", summary, checks: [], technical: safeDetail },
+    });
+  }
+
+  private async initializeCluster(): Promise<void> {
+    if (this.isInitialized()) return;
+    let work: string | undefined;
+    let pwfile: string | undefined;
+    try {
+      // Existing files may be recoverable user data. Never erase or replace them automatically.
+      if (existsSync(this.opts.dataDir) && (lstatSync(this.opts.dataDir).isSymbolicLink() || readdirSync(this.opts.dataDir).length)) {
+        throw new NexusError("infrastructure", "The existing database needs attention.", {
+          problem: {
+            title: "Existing database needs recovery",
+            summary: "Nexus found existing database files that are incomplete. They have been preserved. Restore a backup or contact support to recover them.",
+            checks: [], technical: `Incomplete database at ${this.opts.dataDir}. No existing files were changed.`,
+          },
+        });
+      }
+      // Build in a fresh sibling directory. An interrupted attempt never poisons the final folder.
+      mkdirSync(dirname(this.opts.dataDir), { recursive: true });
+      work = mkdtempSync(join(dirname(this.opts.dataDir), `.${basename(this.opts.dataDir)}-setup-`));
+      if (process.platform === "win32") {
+        // PostgreSQL drops the Administrators group from its token. Give the launching account
+        // its own explicit access to this newly created folder, without granting other users access.
+        const identity = await run("whoami.exe", ["/user", "/fo", "csv", "/nh"]);
+        const sid = identity.out.match(/S-1-5-\d+(?:-\d+)*/)?.[0];
+        if (identity.code !== 0 || !sid) throw this.setupError(`Could not identify the database service account. ${identity.out}`);
+        const accounts = [...new Set([sid, "S-1-5-18", "S-1-5-32-544"])];
+        const acl = await run("icacls.exe", [work, "/inheritance:r", "/grant:r", ...accounts.map((account) => `*${account}:(OI)(CI)F`), "/Q"]);
+        if (acl.code !== 0) throw this.setupError(`Could not prepare database permissions. ${acl.out}`);
+      }
+      const staging = join(work, "data");
+      pwfile = join(work, "password");
+      writeFileSync(pwfile, this.opts.superuserPassword, { mode: 0o600 });
       const r = await run(
         this.tool("initdb"),
         [
           "-D",
-          this.opts.dataDir,
+          staging,
           "-U",
           this.opts.superuser,
           `--pwfile=${pwfile}`,
@@ -244,27 +308,37 @@ export class PostgresEngine {
         {},
         300_000,
       );
-      if (r.code !== 0) {
-        throw new NexusError("infrastructure", "Nexus could not set up the database server.", {
-          problem: { title: "Database setup failed", summary: "The database storage folder could not be prepared.", checks: [], technical: r.out },
-        });
-      }
+      if (r.code !== 0) throw this.setupError(r.out);
+      this.writeConfig(staging);
+      // rmdir only succeeds for an empty directory; a racing writer's files are never removed.
+      if (existsSync(this.opts.dataDir)) rmdirSync(this.opts.dataDir);
+      renameSync(staging, this.opts.dataDir);
+    } catch (e) {
+      if (e instanceof NexusError) throw e;
+      throw this.setupError(e instanceof Error ? `${(e as NodeJS.ErrnoException).code ?? ""}: ${e.message}` : String(e));
     } finally {
-      rmSync(pwfile, { force: true });
+      if (pwfile) {
+        try { rmSync(pwfile, { force: true }); }
+        catch (e) { this.log.error("could not remove database setup password file", { err: e as Error }); }
+      }
+      // Failed staging folders are retained for diagnosis; a retry uses a new one.
+      if (work) {
+        try { if (readdirSync(work).length === 0) rmdirSync(work); }
+        catch (e) { this.log.warn("could not remove empty database setup folder", { err: e as Error }); }
+      }
     }
-    this.writeConfig();
     this.log.info("postgres cluster initialized", { dataDir: this.opts.dataDir });
   }
 
   /** (Re)writes Nexus-managed configuration. Called on every start so tuning follows the hardware. */
-  writeConfig(): void {
-    const confPath = join(this.opts.dataDir, "postgresql.conf");
+  writeConfig(dataDir = this.opts.dataDir): void {
+    const confPath = join(dataDir, "postgresql.conf");
     const conf = readFileSync(confPath, "utf8");
     if (!conf.includes("include_if_exists = 'nexus.conf'")) {
       writeFileSync(confPath, `${conf}\n# Nexus\ninclude_if_exists = 'nexus.conf'\n`);
     }
-    writeFileSync(join(this.opts.dataDir, "nexus.conf"), renderNexusConf(this.opts.port, this.opts.tuning, join(this.opts.dataDir, "log")));
-    writeFileSync(join(this.opts.dataDir, "pg_hba.conf"), PG_HBA);
+    writeFileSync(join(dataDir, "nexus.conf"), renderNexusConf(this.opts.port, this.opts.tuning, join(this.opts.dataDir, "log")));
+    writeFileSync(join(dataDir, "pg_hba.conf"), PG_HBA);
   }
 
   async start(): Promise<void> {

@@ -42,6 +42,7 @@ step(`Building ${productName} ${version}`);
 if (args.includes("--installer-only")) {
   if (!existsSync(join(out, "VERSION")) || !existsSync(join(out, "server", "main.mjs"))) throw new Error("Build dist/app before using --installer-only.");
   verifyNpm(join(out, "node"));
+  execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `& { $ErrorActionPreference = 'Stop'; . '${join(out, "scripts/ensure-runtime.ps1").replaceAll("'", "''")}'; Assert-NexusNativeComponents -Path '${out.replaceAll("'", "''")}' }`], { stdio: "inherit", windowsHide: true });
 } else {
 rmSync(out, { recursive: true, force: true });
 mkdirSync(out, { recursive: true });
@@ -101,6 +102,7 @@ for (const pkg of readdirSync(join(root, "node_modules", "@duckdb"))) {
 mkdirSync(join(out, "scripts"), { recursive: true });
 cpSync(join(root, "scripts/service.mjs"), join(out, "scripts/service.mjs"));
 cpSync(join(root, "scripts/service-settings.mjs"), join(out, "scripts/service-settings.mjs"));
+cpSync(join(root, "scripts/ensure-runtime.ps1"), join(out, "scripts/ensure-runtime.ps1"));
 
 // ---------------------------------------------------------------- node runtime
 step("Node.js runtime");
@@ -117,6 +119,7 @@ for (const f of ["LICENSE"]) if (existsSync(join(nodeDir, f))) cpSync(join(nodeD
 // ---------------------------------------------------------------- smoke test of the staged app
 step("Smoke test of the staged installation");
 verifyNpm(join(out, "node"));
+execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `& { . '${join(out, "scripts/ensure-runtime.ps1").replaceAll("'", "''")}'; Assert-NexusNativeComponents -Path '${out.replaceAll("'", "''")}' }`], { stdio: "inherit", windowsHide: true });
 const smoke = await import(pathToFileURL(join(out, "server/service-config.mjs")).href);
 if (
   !smoke.renderWinswXml({ installDir: out, nodeExe: "x", entry: "y", home: "z", logDir: "w", port: 1 }).includes("<id>")

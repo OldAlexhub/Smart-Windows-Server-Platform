@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import type { FastifyInstance } from "fastify";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { NexusContext } from "../src/context";
 import { authRoutes } from "../src/http/routes/auth";
 import { setupRoutes } from "../src/http/routes/setup";
@@ -53,9 +53,22 @@ describe("first-run setup", () => {
     const d = (n: string) => join(home, "data", n);
     const bad = await call("POST", "/api/v1/setup/apply", { paths: { apps: "relative\\path" } });
     expect(bad.status).toBe(400);
-    const applied = await call("POST", "/api/v1/setup/apply", {
+    const payload = {
       paths: { apps: d("Apps"), database: d("Database"), files: d("Storage"), backups: d("Backups"), ai: d("AI") },
-    });
+    };
+    // Two browser windows must not initialize different clusters or overwrite each other's paths.
+    let entered!: () => void;
+    let fail!: (error: Error) => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const serviceStart = vi.spyOn(ctx, "startDataServices").mockImplementationOnce(() => new Promise<void>((_resolve, reject) => { fail = reject; entered(); }));
+    const pending = call("POST", "/api/v1/setup/apply", payload);
+    await started;
+    expect((await call("POST", "/api/v1/setup/apply", payload)).status).toBe(409);
+    fail(new Error("Simulated interrupted initialization"));
+    expect((await pending).status).toBe(500);
+    expect(ctx.setupCompleted).toBe(false);
+    serviceStart.mockRestore();
+    const applied = await call("POST", "/api/v1/setup/apply", payload);
     expect(applied.status).toBe(200);
     expect(ctx.setupCompleted).toBe(true);
     expect(await ctx.postgres!.state()).toBe("running");

@@ -20,6 +20,20 @@
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL
+  ; Prepare native dependencies offline before node.exe or the database can be launched.
+  DetailPrint "Preparing required Windows components and checking the database..."
+  nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\app\scripts\ensure-runtime.ps1" -AppDir "$INSTDIR\app"'
+  Pop $4
+  Pop $5
+  DetailPrint "$5"
+  ${If} $4 == "3010"
+    SetRebootFlag true
+  ${ElseIf} $4 != "0"
+    MessageBox MB_OK|MB_ICONSTOP "Nexus could not finish preparing a required Windows component.$\r$\n$\r$\n$5$\r$\n$\r$\nRun Nexus setup again after resolving the problem above. Your existing data has been kept." /SD IDOK
+    SetErrorLevel 1
+    Abort
+  ${EndIf}
+
   ; Remember which Windows account installed Nexus: only that account (plus Administrators)
   ; may use the desktop app's automatic sign-in.
   ReadEnvStr $0 "ProgramData"

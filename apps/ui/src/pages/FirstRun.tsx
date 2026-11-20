@@ -80,7 +80,7 @@ export function FirstRun({ onDone }: { onDone: (next: string) => void }) {
     get<Recommendation>("/setup/recommendation")
       .then((r) => {
         setRec(r);
-        setPaths(r.paths);
+        setPaths((current) => current ?? r.paths);
       })
       .catch((e) => setError(e));
   }, [step]);

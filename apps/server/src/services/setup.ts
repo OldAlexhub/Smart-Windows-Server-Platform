@@ -57,8 +57,19 @@ function ensureWritable(label: string, path: string): void {
 }
 
 /** Step 4: "Use Recommended Configuration" (optionally with changed locations). */
+const applying = new WeakSet<NexusContext>();
 export async function applySetup(ctx: NexusContext, input: { paths?: Partial<DataPaths>; aiEnabled?: boolean }): Promise<void> {
   if (ctx.setupCompleted) throw NexusError.conflict("This server is already set up.");
+  if (applying.has(ctx)) throw NexusError.conflict("Nexus is already preparing this server. Please wait for setup to finish.");
+  applying.add(ctx);
+  try {
+    await finishSetup(ctx, input);
+  } finally {
+    applying.delete(ctx);
+  }
+}
+
+async function finishSetup(ctx: NexusContext, input: { paths?: Partial<DataPaths>; aiEnabled?: boolean }): Promise<void> {
   const rec = recommendation(ctx);
   const paths: DataPaths = { ...rec.paths, ...input.paths };
   const labels: Record<keyof DataPaths, string> = {

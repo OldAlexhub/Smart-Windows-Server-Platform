@@ -174,7 +174,7 @@ export class NexusContext {
 
     // PostgreSQL
     const pgDir = this.component("postgresql");
-    const bin = locatePostgresBinaries({ bundledRoots: pgDir ? [join(pgDir, "..")] : [] });
+    const bin = locatePostgresBinaries({ bundledRoots: pgDir ? [join(pgDir, "..")] : [], dataRoot: dp.database });
     if (bin) {
       let superPw = this.vault.get("system/postgres-superuser");
       if (!superPw) {
@@ -214,7 +214,7 @@ export class NexusContext {
       this.dataBrowser = new DataBrowser(this.databases);
       this.stopHooks.push(() => this.postgres?.stop());
     } else {
-      this.log.warn("PostgreSQL binaries not found; database features disabled until the component is installed");
+      throw new NexusError("dependency_missing", "The required database component is missing. Run the Nexus installer again to repair it.");
     }
 
     // Document databases: existing FerretDB databases remain supported; new databases use an
