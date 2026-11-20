@@ -65,6 +65,18 @@ function killPid(pid: number): void {
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const safeKey = (key: string) => key.replace(/[^A-Za-z0-9_.-]/g, "_");
 
+/** A reachable authenticated replica set can still be electing its primary. */
+export async function waitForMongoPrimary(client: MongoClient, replicaSet: string, timeoutMs = 20_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const hello = await client.db("admin").command({ hello: 1, maxTimeMS: 1_000 });
+    if (hello.setName && hello.setName !== replicaSet) throw new Error("MongoDB replica-set identity does not match the configured database.");
+    if (hello.setName === replicaSet && hello.isWritablePrimary === true) return;
+    if (Date.now() >= deadline) throw new Error("MongoDB replica set did not elect its primary.");
+    await wait(100);
+  }
+}
+
 /**
  * One isolated, single-node MongoDB replica set per Nexus document database.
  *
@@ -192,8 +204,7 @@ export class MongoDbFleet implements DocumentEngine {
     await this.waitForPort(secured.child, port, secured.stderr);
     const client = await this.adminClient(databaseKey, port);
     try {
-      const hello = await client.db("admin").command({ hello: 1 });
-      if (hello.setName !== replicaSet || hello.isWritablePrimary !== true) throw new Error("MongoDB replica set did not elect its primary.");
+      await waitForMongoPrimary(client, replicaSet);
     } catch (error) {
       await this.stopOne(databaseKey);
       throw this.startProblem(secured.stderr(), error);
