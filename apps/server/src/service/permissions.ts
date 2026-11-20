@@ -14,8 +14,10 @@ export function desktopUsers(root: string): string[] {
   return readFileSync(f, "utf8")
     .split(/\r?\n/)
     .map((l) => l.trim())
-    // DOMAIN\user or user — nothing that could smuggle extra icacls arguments.
-    .filter((l) => /^[A-Za-z0-9._ -]{1,64}(\\[A-Za-z0-9._ -]{1,64})?$/.test(l));
+    // New installers record numeric SIDs; retain legacy account names for upgrades.
+    // Prefix a SID with * as required by icacls; never accept extra arguments.
+    .filter((l) => /^\*?S-1-(?:\d+-){1,14}\d+$/.test(l) || /^[A-Za-z0-9._ -]{1,64}(\\[A-Za-z0-9._ -]{1,64})?$/.test(l))
+    .map((l) => /^S-1-(?:\d+-){1,14}\d+$/.test(l) ? `*${l}` : l);
 }
 
 /**

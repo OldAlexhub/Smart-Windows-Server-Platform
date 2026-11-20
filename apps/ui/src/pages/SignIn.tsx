@@ -3,7 +3,7 @@ import { BRAND } from "@nexus/shared/brand";
 import { ApiError, post } from "../lib/api";
 
 /** Password (+ two-step code) sign-in, used for remote administration and additional users. */
-export function SignIn({ onDone, sessionEnded = false, desktop = false }: { onDone: () => void; sessionEnded?: boolean; desktop?: boolean }) {
+export function SignIn({ onDone, sessionEnded = false, desktop = false, localAccessUnavailable = false }: { onDone: () => void; sessionEnded?: boolean; desktop?: boolean; localAccessUnavailable?: boolean }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [code, setCode] = useState("");
@@ -39,19 +39,27 @@ export function SignIn({ onDone, sessionEnded = false, desktop = false }: { onDo
           <p className="secondary" style={{ marginTop: 4 }}>
             {pending
               ? "Enter the 6-digit code from your authenticator app."
-              : sessionEnded
-                ? "Your session ended. Sign in again to continue."
-                : "Sign in to manage this server."}
+              : desktop && localAccessUnavailable
+                ? "Nexus is running. Automatic sign-in is unavailable."
+                : sessionEnded
+                  ? "Your session ended. Sign in again to continue."
+                  : "Sign in to manage this server."}
           </p>
         </div>
+        {desktop && localAccessUnavailable && !pending && (
+          <div className="notice stack small" role="status">
+            <p>Already have a Nexus username and password? Enter them below.</p>
+            <p>No Nexus password yet? Use the Windows account that installed Nexus, or close the control center from the Nexus tray menu, then right-click Nexus in Start and choose <strong>Run as administrator</strong>.</p>
+          </div>
+        )}
         {desktop && !pending && (
           <>
             <button
-              className="btn primary large"
+              className={`btn ${localAccessUnavailable ? "" : "primary"} large`}
               type="button"
               onClick={() => location.replace("http://tauri.localhost/index.html")}
             >
-              Continue on this computer
+              {localAccessUnavailable ? "Retry automatic sign-in" : "Continue on this computer"}
             </button>
             <p className="small muted" style={{ textAlign: "center" }}>
               or sign in with a Nexus account
@@ -80,7 +88,7 @@ export function SignIn({ onDone, sessionEnded = false, desktop = false }: { onDo
             {error}
           </div>
         )}
-        <button className={`btn ${desktop && !pending ? "" : "primary"} large`} disabled={busy}>
+        <button className={`btn ${desktop && !pending && !localAccessUnavailable ? "" : "primary"} large`} disabled={busy}>
           {pending ? "Verify" : "Sign in"}
         </button>
       </form>

@@ -44,7 +44,7 @@
           location.replace(url);
         } catch (e) {
           $("spin").hidden = true;
-          $("title").textContent = "Nexus isn't running yet";
+          $("title").textContent = "Couldn't connect to Nexus";
           $("detail").textContent = String(e);
           $("detail").classList.add("err");
           $("retry").hidden = false;

@@ -34,18 +34,8 @@
     Abort
   ${EndIf}
 
-  ; Remember which Windows account installed Nexus: only that account (plus Administrators)
-  ; may use the desktop app's automatic sign-in.
-  ReadEnvStr $0 "ProgramData"
-  CreateDirectory "$0\Nexus"
-  ReadEnvStr $1 "USERDOMAIN"
-  ReadEnvStr $2 "USERNAME"
-  FileOpen $3 "$0\Nexus\desktop-users.txt" a
-  FileSeek $3 0 END
-  FileWrite $3 "$1\$2$\r$\n"
-  FileClose $3
-
-  ; Register (or upgrade) and start the background service.
+  ; The service installer records this Windows identity by SID in the actual data folder,
+  ; then registers (or upgrades) and starts the background service.
   DetailPrint "Starting the Nexus background service..."
   nsExec::ExecToLog '"$INSTDIR\app\node\node.exe" "$INSTDIR\app\scripts\service.mjs" install --install-dir "$INSTDIR\app"'
   Pop $4

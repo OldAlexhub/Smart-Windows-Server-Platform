@@ -55,7 +55,18 @@ fn start_service() {
     let _ = Command::new("true").output();
 }
 
-/// Called by the loader page: make sure the service is up, then return a signed-in address.
+/// A healthy server must remain reachable even when automatic sign-in is unavailable.
+fn control_center_url(port: u16, token: std::io::Result<String>) -> String {
+    if let Ok(token) = token {
+        let token = token.trim();
+        if !token.is_empty() && token.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+            return format!("http://127.0.0.1:{port}/?desktop=1&local={token}");
+        }
+    }
+    format!("http://127.0.0.1:{port}/?desktop=1&localAccess=unavailable")
+}
+
+/// Called by the loader page: make sure the service is up, then open the control center.
 #[tauri::command]
 async fn connect() -> Result<String, String> {
     let port = port();
@@ -73,15 +84,9 @@ async fn connect() -> Result<String, String> {
         // The service rotates this token on every start and only administrators and the
         // installing user can read it. It signs the Owner in on this computer only.
         let token_file = nexus_home().join("local-access.token");
-        let token = std::fs::read_to_string(&token_file)
-            .map_err(|_| "Nexus is running, but this Windows account isn't allowed to open it. Sign in with the account that installed Nexus, or use a Nexus username and password.".to_string())?;
-        let token = token.trim();
-        if token.is_empty() || !token.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
-            return Err("The local sign-in key is unreadable. Restart the Nexus service and try again.".to_string());
-        }
         // The marker lets the web UI remember that it was opened through this trusted
         // desktop loader. It is removed from the address bar with the token.
-        Ok(format!("http://127.0.0.1:{port}/?desktop=1&local={token}"))
+        Ok(control_center_url(port, std::fs::read_to_string(&token_file)))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -179,6 +184,18 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opens_password_sign_in_when_the_local_key_cannot_be_used() {
+        let fallback = "http://127.0.0.1:8890/?desktop=1&localAccess=unavailable";
+        for kind in [std::io::ErrorKind::PermissionDenied, std::io::ErrorKind::NotFound, std::io::ErrorKind::InvalidData] {
+            assert_eq!(control_center_url(8890, Err(std::io::Error::from(kind))), fallback);
+        }
+        for token in ["", "  \n", "not&a=token", "invalid/key"] {
+            assert_eq!(control_center_url(8890, Ok(token.into())), fallback);
+        }
+        assert_eq!(control_center_url(8890, Ok("abc-DEF_123\r\n".into())), "http://127.0.0.1:8890/?desktop=1&local=abc-DEF_123");
+    }
 
     #[test]
     fn keeps_nexus_pages_and_sends_everything_else_to_the_browser() {

@@ -102,6 +102,7 @@ for (const pkg of readdirSync(join(root, "node_modules", "@duckdb"))) {
 mkdirSync(join(out, "scripts"), { recursive: true });
 cpSync(join(root, "scripts/service.mjs"), join(out, "scripts/service.mjs"));
 cpSync(join(root, "scripts/service-settings.mjs"), join(out, "scripts/service-settings.mjs"));
+cpSync(join(root, "scripts/desktop-user.mjs"), join(out, "scripts/desktop-user.mjs"));
 cpSync(join(root, "scripts/ensure-runtime.ps1"), join(out, "scripts/ensure-runtime.ps1"));
 
 // ---------------------------------------------------------------- node runtime

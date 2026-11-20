@@ -46,6 +46,23 @@ describe("data folder hardening", () => {
     rmSync(root, { recursive: true, force: true });
   });
 
+  it.runIf(process.platform === "win32")("grants SID-based desktop identities read access only to the sign-in key", () => {
+    const root = mkdtempSync(join(tmpdir(), "nexus-acl-"));
+    try {
+      const token = join(root, "local-access.token");
+      writeFileSync(token, "secret");
+      writeFileSync(join(root, "desktop-users.txt"), "\uFEFFS-1-5-21-111-222-333-1001\r\n*S-1-12-1-111-222-333-444\r\n*Everyone:F\r\n");
+      const calls: string[][] = [];
+      allowDesktopUsers(token, root, silentLogger, (a) => void calls.push(a));
+      expect(calls).toEqual([
+        [token, "/grant", "*S-1-5-21-111-222-333-1001:R", "/Q"],
+        [token, "/grant", "*S-1-12-1-111-222-333-444:R", "/Q"],
+      ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it.runIf(process.platform === "win32")("leaves every existing file usable by SYSTEM and Administrators (real icacls)", () => {
     const root = mkdtempSync(join(tmpdir(), "nexus-acl-"));
     const me = `${process.env.USERDOMAIN}\\${process.env.USERNAME}`;

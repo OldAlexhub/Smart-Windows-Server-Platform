@@ -14,6 +14,7 @@ import { execFileSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { readServiceSettings } from "./service-settings.mjs";
+import { recordDesktopUser } from "./desktop-user.mjs";
 
 const args = process.argv.slice(2);
 const command = args[0];
@@ -77,6 +78,7 @@ switch (command) {
     // Resolve and validate every new input before removing a working registration.
     const winsw = findWinsw();
     const config = await renderXml();
+    recordDesktopUser(home);
     if (current !== "NonExistent") {
       run("uninstall");
     }

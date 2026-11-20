@@ -34,10 +34,11 @@ export interface Me {
 async function exchangeLocalToken(): Promise<void> {
   const url = new URL(location.href);
   const token = url.searchParams.get("local");
-  if (!token) return;
   url.searchParams.delete("local");
   url.searchParams.delete("desktop");
+  url.searchParams.delete("localAccess");
   history.replaceState(null, "", url.pathname + url.search + url.hash);
+  if (!token) return;
   try {
     await post("/auth/local", { token });
   } catch {
@@ -50,6 +51,7 @@ export function App() {
   const [state, setState] = useState<"loading" | "signin" | "ready">("loading");
   const [sessionEnded, setSessionEnded] = useState(false);
   const [desktop] = useState(() => new URL(location.href).searchParams.get("desktop") === "1");
+  const [localAccessUnavailable] = useState(() => new URL(location.href).searchParams.get("localAccess") === "unavailable");
   const hasAuthenticated = useRef(false);
 
   const load = useCallback(async () => {
@@ -80,7 +82,7 @@ export function App() {
         <Spinner label="Connecting to your server…" />
       </div>
     );
-  if (state === "signin" || !me) return <SignIn onDone={load} sessionEnded={sessionEnded} desktop={desktop} />;
+  if (state === "signin" || !me) return <SignIn onDone={load} sessionEnded={sessionEnded} desktop={desktop} localAccessUnavailable={localAccessUnavailable} />;
   if (!me.setupCompleted && me.permissions.includes("server.settings")) {
     return (
       <FirstRun
